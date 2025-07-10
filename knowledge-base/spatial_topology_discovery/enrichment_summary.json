@@ -1,15 +1,3 @@
-{
-  "total_variables_enriched": 948,
-  "average_agreement_score": 0.815000000000017,
-  "average_confidence_score": 0.7849999999999977,
-  "synthesis_method_distribution": {
-    "high_agreement_merge": 948
-  },
-  "arbitration_cases": 0,
-  "error_cases": 0,
-  "high_agreement_count": 948,
-  "medium_agreement_count": 0,
-  "low_agreement_count": 0,
-  "analysis_timestamp": "2025-06-26T03:28:04.517399",
-  "enrichment_type": "real_api_collaborative"
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:3bb2ba70feed12f37fa560e68baca2156fb5c96fcb3e1f3b78da62ca502cf956
+size 446

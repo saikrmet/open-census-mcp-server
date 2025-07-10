@@ -1,24 +1,3 @@
-{
-  "version": "1.0",
-  "description": "Statistical intelligence rules for choosing proper measures",
-  "measure_preferences": {
-    "income": "median",
-    "salary": "median",
-    "earnings": "median",
-    "wages": "median",
-    "pay": "median",
-    "home_value": "median",
-    "rent": "median",
-    "housing_cost": "median",
-    "age": "median",
-    "population": "total",
-    "people": "total",
-    "rate": "percentage",
-    "unemployment": "rate_calculation"
-  },
-  "explanations": {
-    "median": "Half the values are above this amount, half below (better than average for income data)",
-    "total": "Complete count of all individuals",
-    "percentage": "Rate calculated as proportion of relevant population"
-  }
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:b4ff5dd433299a19eccf956c1a1625d3a21002913a4b3db48c002845c7d64545
+size 721

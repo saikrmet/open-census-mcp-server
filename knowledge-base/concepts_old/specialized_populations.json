@@ -1,24 +1,3 @@
-{
-  "meta": {
-    "category": "specialized_populations",
-    "status": "auto_approved",
-    "concept_count": 1,
-    "confidence_threshold": "\u22650.9"
-  },
-  "concepts": [
-    {
-      "id": "cendata:ForeignBornPopulation",
-      "label": "Foreign-Born Population",
-      "bucket": "specialized_populations",
-      "universe": "Total population",
-      "stat_method": "count",
-      "census_tables": [
-        "B05001"
-      ],
-      "definition": "Population born outside the United States",
-      "source_page": 101,
-      "status": "auto",
-      "confidence": 0.9
-    }
-  ]
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:676ae2eb2b0333ff3e32d88f269b922f72bd525fb76e5f3686e04e03c749317f
+size 578
