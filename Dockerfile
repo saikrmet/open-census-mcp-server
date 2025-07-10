@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
         libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
         build-essential \
+        cmake \
+        libabsl-dev \
         git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,11 +39,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --------------------------------------------------
 # 3️⃣  R packages needed by tidycensus
 # --------------------------------------------------
-RUN R -e "options(repos = c(CRAN='https://cloud.r-project.org')); \
-          install.packages('tidycensus', dependencies=TRUE)" \
-    && R -e "if (!require('tidycensus', quietly=TRUE)) stop('tidycensus installation failed')"
+# Install tidycensus (sf dependencies should now work)
+RUN R -e "options(repos = c(CRAN = 'https://cloud.r-project.org/')); \
+          install.packages('tidycensus', dependencies=TRUE); \
+          if (!require('tidycensus', quietly=TRUE)) { \
+            cat('TIDYCENSUS INSTALLATION FAILED\n'); \
+            q(status=1) \
+          } else { \
+            cat('tidycensus installed successfully\n') \
+          }"
 
-# Verify R packages work
+# Verify all packages work
 RUN R -e "library(jsonlite); library(dplyr); library(tidycensus); cat('All R packages loaded successfully\n')"
 
 # --------------------------------------------------

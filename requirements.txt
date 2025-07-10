@@ -5,6 +5,11 @@ mcp>=1.0.0
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
 
+# Vector database and embeddings
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.0
+
 # Document processing
 PyPDF2>=3.0.0
 beautifulsoup4>=4.11.0
