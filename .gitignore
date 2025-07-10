@@ -211,3 +211,4 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .env
+knowledge-base/2023_ACS_Enriched_Universe.json
