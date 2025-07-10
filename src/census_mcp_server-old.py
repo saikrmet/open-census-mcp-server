@@ -55,14 +55,21 @@ class CensusMCPServer:
     """
     
     def __init__(self):
-        """Initialize server with minimal setup - no heavy operations."""
+        """Initialize server components."""
         self.config = Config()
         
-        # Don't initialize heavy components yet!
-        self.knowledge_base = None
-        self.r_engine = None
-        self._init_promise = None
-        self._init_status = 'pending'
+        # Initialize knowledge base (Vector DB/RAG)
+        logger.info("Initializing knowledge base...")
+        self.knowledge_base = KnowledgeBase(
+            corpus_path=self.config.r_docs_corpus_path,
+            vector_db_path=self.config.vector_db_path
+        )
+        
+        # Initialize AI-optimized R data retrieval engine
+        logger.info("Initializing AI-optimized R data retrieval engine...")
+        self.r_engine = RDataRetrieval(
+            r_script_path=self.config.r_script_path
+        )
         
         # Create MCP server instance
         self.server = Server("census-mcp")
@@ -70,50 +77,7 @@ class CensusMCPServer:
         # Register tools
         self._register_tools()
         
-        logger.info("Census MCP Server created (fast init)")
-    
-    async def _ensure_initialized(self):
-        """Lazy initialization - only load heavy components when needed."""
-        if self._init_status == 'ready':
-            return
-        
-        if self._init_status == 'failed':
-            raise RuntimeError("Initialization failed")
-        
-        if self._init_promise is None:
-            print("Starting heavy initialization...", file=sys.stderr)
-            self._init_promise = self._do_heavy_initialization()
-        
-        await self._init_promise
-    
-    async def _do_heavy_initialization(self):
-        """The actual heavy initialization - moved out of __init__."""
-        try:
-            logger.info("Starting heavy initialization (BGE model, knowledge base)...")
-            print("Loading BGE model and knowledge base...", file=sys.stderr)
-            
-            # Initialize knowledge base (this loads the BGE model)
-            self.knowledge_base = KnowledgeBase(
-                corpus_path=self.config.r_docs_corpus_path,
-                vector_db_path=self.config.vector_db_path
-            )
-            
-            print("Knowledge base loaded, initializing R engine...", file=sys.stderr)
-            
-            # Initialize R engine
-            self.r_engine = RDataRetrieval(
-                r_script_path=self.config.r_script_path
-            )
-            
-            self._init_status = 'ready'
-            logger.info("Heavy initialization completed successfully")
-            print("Heavy initialization completed!", file=sys.stderr)
-            
-        except Exception as e:
-            self._init_status = 'failed'
-            logger.error(f"Heavy initialization failed: {e}")
-            print(f"Heavy initialization failed: {e}", file=sys.stderr)
-            raise
+        logger.info("Census MCP Server initialized successfully")
     
     def _register_tools(self):
         """Register MCP tools with psychology optimized for Claude selection."""
@@ -206,9 +170,6 @@ class CensusMCPServer:
         async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             """Handle tool execution requests."""
             try:
-                # Ensure heavy components are loaded before any tool call
-                await self._ensure_initialized()
-                
                 if name == "get_demographic_data":
                     return await self._get_demographic_data(arguments)
                 elif name == "compare_locations":
@@ -278,7 +239,7 @@ class CensusMCPServer:
         locations = arguments["locations"]
         variables = arguments["variables"]
         year = arguments.get("year", 2023)
-        survey = arguments.get("survey", "acs5")
+        survey = arguments.get("survey", "acs5")  # ← FIXED: was missing!
         
         logger.info(f"🏛️ Comparing OFFICIAL data for locations: {locations}, variables: {variables}")
         
@@ -500,12 +461,10 @@ class CensusMCPServer:
 async def main():
     """Main entry point for the MCP server."""
     logger.info("🏛️ Starting Census MCP Server (Container Mode)...")
-    print("Starting Census MCP Server with lazy loading...", file=sys.stderr)
     
     try:
-        # Create server instance (fast initialization)
+        # Create server instance
         census_server = CensusMCPServer()
-        print("MCP Server created, ready for connections...", file=sys.stderr)
         
         # Run server with stdio transport (for Claude Desktop)
         async with stdio_server() as (read_stream, write_stream):
@@ -516,7 +475,6 @@ async def main():
             )
     except Exception as e:
         logger.error(f"❌ Server error: {str(e)}")
-        print(f"Server error: {str(e)}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

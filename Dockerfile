@@ -30,11 +30,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------
-# 2️⃣  Python dependencies
+# 2️⃣  Python dependencies + model pre-caching
 # --------------------------------------------------
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional packages for kb_search if not in requirements.txt
+RUN pip install --no-cache-dir faiss-cpu sentence-transformers
+
+# Pre-download and cache the BGE model with explicit cache directory
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence_transformers
+RUN mkdir -p /app/.cache/sentence_transformers && \
+    python -c "import sys; print('Pre-caching BGE model...', file=sys.stderr); from sentence_transformers import SentenceTransformer; model = SentenceTransformer('BAAI/bge-large-en-v1.5'); print('BGE model cached successfully!', file=sys.stderr)" && \
+    chown -R census:census /app/.cache
 
 # --------------------------------------------------
 # 3️⃣  R packages needed by tidycensus
@@ -49,8 +58,8 @@ RUN R -e "options(repos = c(CRAN = 'https://cloud.r-project.org/')); \
             cat('tidycensus installed successfully\n') \
           }"
 
-# Verify all packages work
-RUN R -e "library(jsonlite); library(dplyr); library(tidycensus); cat('All R packages loaded successfully\n')"
+# Cache sentence transformer models to avoid re-downloading
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-mpnet-base-v2')"
 
 # --------------------------------------------------
 # 4️⃣  Runtime‑only KB assets + application code
@@ -82,6 +91,7 @@ COPY knowledge-base/kb_search.py          /app/
 # 5️⃣  Environment configuration
 # --------------------------------------------------
 ENV VECTOR_DB_TYPE=chromadb \
+    EMBEDDING_MODEL=BAAI/bge-large-en-v1.5 \
     PYTHONPATH=/app:/app/src \
     CENSUS_MCP_CONTAINER=true \
     R_EXECUTABLE=/usr/bin/Rscript
