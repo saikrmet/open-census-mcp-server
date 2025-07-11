@@ -36,14 +36,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install additional packages for kb_search if not in requirements.txt
 RUN pip install --no-cache-dir faiss-cpu sentence-transformers
 
 # Pre-download and cache the BGE model with explicit cache directory
 ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence_transformers
 RUN mkdir -p /app/.cache/sentence_transformers && \
-    python -c "import sys; print('Pre-caching BGE model...', file=sys.stderr); from sentence_transformers import SentenceTransformer; model = SentenceTransformer('BAAI/bge-large-en-v1.5'); print('BGE model cached successfully!', file=sys.stderr)" && \
-    chown -R census:census /app/.cache
+    python -c "import sys; print('Pre-caching BGE model...', file=sys.stderr); from sentence_transformers import SentenceTransformer; model = SentenceTransformer('BAAI/bge-large-en-v1.5'); print('BGE model cached successfully!', file=sys.stderr)"
 
 # --------------------------------------------------
 # 3️⃣  R packages needed by tidycensus
@@ -67,8 +65,6 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # ChromaDB knowledge base (main vector database)
 COPY knowledge-base/vector-db/            /app/data/vector_db/
 
-# FAISS stats index (kb_search.py)
-COPY knowledge-base/stats-index/          /app/stats-index/
 
 # Concepts + geo scalars
 COPY knowledge-base/concepts/concept_backbone.ttl \
@@ -83,9 +79,9 @@ COPY data/table_geos.json                 /app/data/
 COPY knowledge-base/2023_ACS_Enriched_Universe.json /app/
 COPY knowledge-base/scripts/COOS_Complete_Ontology.json /app/
 
-# Application code
+# Application code and configuration
 COPY src/                                 /app/src/
-COPY knowledge-base/kb_search.py          /app/
+COPY config/                              /app/config/
 
 # --------------------------------------------------
 # 5️⃣  Environment configuration
@@ -99,13 +95,12 @@ ENV VECTOR_DB_TYPE=chromadb \
 # --------------------------------------------------
 # 6️⃣  Drop root privileges
 # --------------------------------------------------
-RUN useradd -m -u 1000 census && chown -R census:census /app
+RUN useradd -m -u 1000 census && chown -R census:census /app && chown -R census:census /app/.cache
 USER census
 
 # --------------------------------------------------
 # 7️⃣  Container health‑check & launch
 # --------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "from kb_search import search; exit(0 if search('median household income') else 1)"
 
 CMD ["python", "src/census_mcp_server.py"]

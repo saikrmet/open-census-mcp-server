@@ -28,8 +28,6 @@ services:
     tty: true
     restart: unless-stopped
     healthcheck:
-      # Test actual kb_search functionality with known query
-      test: ["CMD", "python", "-c", "from kb_search import search; exit(0 if search('median household income') else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
