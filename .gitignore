@@ -15,6 +15,13 @@ data/vector_db/*
 knowledge-base/*.log
 knowledge-base/build_manifest.json
 
+# Ignore all model cache files (recommended)
+knowledge-base/model_cache/
+
+# Or, if you only want to exclude safetensors files in any subfolder
+*.safetensors
+
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
