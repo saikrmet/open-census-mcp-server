@@ -3,6 +3,7 @@
 # ---------------------------------------------
 # * Python 3.11‑slim as base
 # * R + tidycensus for data retrieval helpers
+# * Pre-cached sentence transformer model (all-mpnet-base-v2)
 # * Runtime‑only KB assets (ChromaDB + FAISS, concepts, geo scalars)
 # * No raw PDFs / build scripts → lean container
 #
@@ -30,18 +31,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------
-# 2️⃣  Python dependencies + model pre-caching
+# 2️⃣  Python dependencies
 # --------------------------------------------------
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir faiss-cpu sentence-transformers
+# --------------------------------------------------
+# 2.5️⃣  Pre-download sentence transformer model
+# --------------------------------------------------
+RUN python -c "from sentence_transformers import SentenceTransformer; \
+               import os; \
+               os.makedirs('/app/model_cache', exist_ok=True); \
+               print('🔄 Downloading all-mpnet-base-v2 model (~400MB)...'); \
+               model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', \
+                                         cache_folder='/app/model_cache'); \
+               print(f'✅ Model cached: {model.get_sentence_embedding_dimension()} dimensions'); \
+               print(f'   Max sequence length: {model.max_seq_length}'); \
+               print('   Container is now self-contained!');"
 
-# Pre-download and cache the BGE model with explicit cache directory
-ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence_transformers
-RUN mkdir -p /app/.cache/sentence_transformers && \
-    python -c "import sys; print('Pre-caching BGE model...', file=sys.stderr); from sentence_transformers import SentenceTransformer; model = SentenceTransformer('BAAI/bge-large-en-v1.5'); print('BGE model cached successfully!', file=sys.stderr)"
+# Set environment variable so the app knows where to find the cached model
+ENV SENTENCE_TRANSFORMERS_CACHE=/app/model_cache
 
 # --------------------------------------------------
 # 3️⃣  R packages needed by tidycensus
@@ -56,8 +66,8 @@ RUN R -e "options(repos = c(CRAN = 'https://cloud.r-project.org/')); \
             cat('tidycensus installed successfully\n') \
           }"
 
-# Cache sentence transformer models to avoid re-downloading
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-mpnet-base-v2')"
+# Verify all packages work
+RUN R -e "library(jsonlite); library(dplyr); library(tidycensus); cat('All R packages loaded successfully\n')"
 
 # --------------------------------------------------
 # 4️⃣  Runtime‑only KB assets + application code
@@ -65,6 +75,8 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # ChromaDB knowledge base (main vector database)
 COPY knowledge-base/vector-db/            /app/data/vector_db/
 
+# Remove obsolete stats-index (kb_search.py was removed)
+# COPY knowledge-base/stats-index/          /app/stats-index/
 
 # Concepts + geo scalars
 COPY knowledge-base/concepts/concept_backbone.ttl \
@@ -79,28 +91,28 @@ COPY data/table_geos.json                 /app/data/
 COPY knowledge-base/2023_ACS_Enriched_Universe.json /app/
 COPY knowledge-base/scripts/COOS_Complete_Ontology.json /app/
 
-# Application code and configuration
+# Application code
 COPY src/                                 /app/src/
-COPY config/                              /app/config/
 
 # --------------------------------------------------
 # 5️⃣  Environment configuration
 # --------------------------------------------------
 ENV VECTOR_DB_TYPE=chromadb \
-    EMBEDDING_MODEL=BAAI/bge-large-en-v1.5 \
     PYTHONPATH=/app:/app/src \
     CENSUS_MCP_CONTAINER=true \
-    R_EXECUTABLE=/usr/bin/Rscript
+    R_EXECUTABLE=/usr/bin/Rscript \
+    EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
 
 # --------------------------------------------------
 # 6️⃣  Drop root privileges
 # --------------------------------------------------
-RUN useradd -m -u 1000 census && chown -R census:census /app && chown -R census:census /app/.cache
+RUN useradd -m -u 1000 census && chown -R census:census /app
 USER census
 
 # --------------------------------------------------
 # 7️⃣  Container health‑check & launch
 # --------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import sys; sys.path.append('/app/src'); from census_mcp_server import health_check; exit(0 if health_check() else 1)"
 
 CMD ["python", "src/census_mcp_server.py"]
