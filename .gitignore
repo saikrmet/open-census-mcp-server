@@ -16,7 +16,8 @@ knowledge-base/*.log
 knowledge-base/build_manifest.json
 
 # Ignore all model cache files (recommended)
-knowledge-base/model_cache/*
+knowledge-base/model_cache/
+/knowledge-base/model_cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
