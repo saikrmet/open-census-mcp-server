@@ -3,14 +3,14 @@
 Census MCP Server - Containerized Census expertise via MCP protocol
 
 Provides natural language access to US Census data through:
-- AI-optimized semantic index for fast variable mapping
-- R tidycensus integration for data retrieval
+- Python Census API client (replaces R tidycensus)
+- Vector DB with semantic variable resolution
 - Statistical validation and geographic resolution
 
 Architecture components:
 - MCP Server (this file) - Protocol interface
-- Knowledge Base - Vector DB with R docs corpus
-- Data Retrieval Engine - R subprocess execution with hybrid mapping
+- Knowledge Base - Vector DB with Census corpus
+- Python Census API - Direct api.census.gov client
 """
 
 import asyncio
@@ -33,7 +33,7 @@ from mcp.types import (
 
 # Local imports
 from knowledge.vector_db import KnowledgeBase
-from data_retrieval.r_engine import RDataRetrieval
+from data_retrieval.python_census_api import PythonCensusAPI
 from utils.config import Config
 
 # Configure logging
@@ -49,8 +49,8 @@ class CensusMCPServer:
     
     Handles:
     - MCP protocol communication
-    - AI-optimized variable mapping via semantic index
-    - R subprocess coordination for data retrieval
+    - Semantic variable mapping via vector DB
+    - Python Census API for data retrieval
     - Response formatting with statistical context
     """
     
@@ -60,7 +60,7 @@ class CensusMCPServer:
         
         # Don't initialize heavy components yet!
         self.knowledge_base = None
-        self.r_engine = None
+        self.python_api = None
         self._init_promise = None
         self._init_status = 'pending'
         
@@ -86,6 +86,8 @@ class CensusMCPServer:
         
         await self._init_promise
     
+    # In census_mcp_server.py, update the _do_heavy_initialization method:
+
     async def _do_heavy_initialization(self):
         """The actual heavy initialization - moved out of __init__."""
         try:
@@ -94,20 +96,27 @@ class CensusMCPServer:
             
             # Initialize knowledge base (this loads the BGE model)
             self.knowledge_base = KnowledgeBase(
-                corpus_path=self.config.r_docs_corpus_path,
+                corpus_path=self.config.knowledge_corpus_path,
                 vector_db_path=self.config.vector_db_path
             )
             
-            print("Knowledge base loaded, initializing R engine...", file=sys.stderr)
+            print("Knowledge base loaded, initializing Python Census API...", file=sys.stderr)
             
-            # Initialize R engine
-            self.r_engine = RDataRetrieval(
-                r_script_path=self.config.r_script_path
+            # Initialize Python Census API client WITH knowledge base injection
+            self.python_api = PythonCensusAPI(
+                api_key=os.getenv("CENSUS_API_KEY"),
+                knowledge_base=self.knowledge_base  # 🎯 INJECT THE 67K KNOWLEDGE BASE
             )
             
             self._init_status = 'ready'
             logger.info("Heavy initialization completed successfully")
             print("Heavy initialization completed!", file=sys.stderr)
+            
+        except Exception as e:
+            self._init_status = 'failed'
+            logger.error(f"Heavy initialization failed: {e}")
+            print(f"Heavy initialization failed: {e}", file=sys.stderr)
+            raise
             
         except Exception as e:
             self._init_status = 'failed'
@@ -231,7 +240,7 @@ class CensusMCPServer:
         """
         Get demographic data for a specific location.
         
-        Uses AI-optimized semantic index and R tidycensus for official data retrieval.
+        Uses semantic variable resolution and Python Census API for official data retrieval.
         """
         location = arguments["location"]
         variables = arguments["variables"]
@@ -254,8 +263,8 @@ class CensusMCPServer:
             logger.warning(f"Location parsing unavailable: {e}")
             location_info = {'original': location, 'confidence': 'medium'}
         
-        # Step 3: Call AI-optimized R engine to get data
-        census_data = await self.r_engine.get_acs_data(
+        # Step 3: Call Python Census API to get data
+        census_data = await self.python_api.get_acs_data(
             location=location,
             variables=variables,
             year=year,
@@ -292,7 +301,7 @@ class CensusMCPServer:
         # Get data for each location
         comparison_data = []
         for location in locations:
-            data = await self.r_engine.get_acs_data(
+            data = await self.python_api.get_acs_data(
                 location=location,
                 variables=variables,
                 year=year,
@@ -351,27 +360,28 @@ class CensusMCPServer:
         
         # Add official data with context and margins of error
         for var in variables:
-            if var in data:
-                var_data = data[var]
+            if var in data.get('data', {}):
+                var_data = data['data'][var]
                 var_context = context.get(var, {})
                 
                 response_parts.append(f"## {var_context.get('label', var.title())}")
                 
-                estimate = var_data.get('estimate', 'N/A')
+                # Get the actual value (field name is 'value', not 'estimate')
+                estimate = var_data.get('value', 'N/A')
                 response_parts.append(f"**Official Value**: {estimate:,}" if isinstance(estimate, (int, float)) else f"**Official Value**: {estimate}")
                 
-                # Add margin of error if available
-                if 'moe' in var_data and var_data['moe'] is not None:
-                    moe = var_data['moe']
+                # Add margin of error if available (field name is 'margin_of_error', not 'moe')
+                if 'margin_of_error' in var_data and var_data['margin_of_error'] is not None:
+                    moe = var_data['margin_of_error']
                     if isinstance(moe, (int, float)) and isinstance(estimate, (int, float)):
                         moe_pct = (moe / estimate * 100) if estimate > 0 else 0
                         response_parts.append(f"**Margin of Error**: ±{moe:,} ({moe_pct:.1f}%)")
                     else:
                         response_parts.append(f"**Margin of Error**: ±{moe}")
                 
-                # Add Census variable code for reference
-                if 'variable_code' in var_data:
-                    response_parts.append(f"**Census Code**: {var_data['variable_code']}")
+                # Add Census variable code for reference (field name is 'variable_id', not 'variable_code')
+                if 'variable_id' in var_data:
+                    response_parts.append(f"**Census Code**: {var_data['variable_id']}")
                 
                 # Add definition from knowledge base
                 if 'definition' in var_context:
@@ -499,8 +509,8 @@ class CensusMCPServer:
 
 async def main():
     """Main entry point for the MCP server."""
-    logger.info("🏛️ Starting Census MCP Server (Container Mode)...")
-    print("Starting Census MCP Server with lazy loading...", file=sys.stderr)
+    logger.info("🏛️ Starting Census MCP Server (Python API Mode)...")
+    print("Starting Census MCP Server with Python Census API...", file=sys.stderr)
     
     try:
         # Create server instance (fast initialization)
