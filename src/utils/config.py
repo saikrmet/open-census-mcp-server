@@ -4,6 +4,7 @@ Configuration management for Census MCP Server
 Handles paths, environment variables, and settings for containerized deployment.
 Supports both local development and Docker container environments.
 Pure Python implementation with direct Census API access.
+Updated for dual-path vector database architecture with FAISS integration.
 """
 
 import os
@@ -21,6 +22,7 @@ class Config:
     Loads settings from environment variables, config files, and defaults.
     Container-aware for seamless Docker deployment.
     Pure Python with direct Census API access.
+    Supports dual-path vector database architecture with FAISS for instant loading.
     """
     
     def __init__(self, config_file: Optional[str] = None):
@@ -45,9 +47,14 @@ class Config:
         # Knowledge Base paths
         self.knowledge_corpus_path = self.data_dir / "knowledge_corpus"
         
-        # Vector Database
+        # Dual-Path Vector Database Configuration
+        self.knowledge_base_dir = self.base_dir / "knowledge-base"
+        self.variables_db_path = self.knowledge_base_dir / "variables-faiss"
+        self.methodology_db_path = self.knowledge_base_dir / "methodology-db"
+        
+        # Legacy vector DB path (for backward compatibility)
         self.vector_db_path = self.data_dir / "vector_db"
-        self.vector_db_type = os.getenv('VECTOR_DB_TYPE', 'chromadb')
+        self.vector_db_type = os.getenv('VECTOR_DB_TYPE', 'dual-path')
         
         # Census API Configuration
         self.census_api_key = os.getenv('CENSUS_API_KEY')
@@ -118,6 +125,12 @@ class Config:
         # Create data directories
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.knowledge_corpus_path.mkdir(parents=True, exist_ok=True)
+        
+        # Dual-path database directories
+        self.knowledge_base_dir.mkdir(parents=True, exist_ok=True)
+        # Note: Don't auto-create variables-faiss and methodology-db as they should be built explicitly
+        
+        # Legacy vector DB directory (for backward compatibility)
         self.vector_db_path.mkdir(parents=True, exist_ok=True)
         
         # Validate embedding model
@@ -146,7 +159,17 @@ class Config:
         logger.info("Census MCP Server Configuration:")
         logger.info(f"  Base directory: {self.base_dir}")
         logger.info(f"  Data directory: {self.data_dir}")
-        logger.info(f"  Vector DB path: {self.vector_db_path}")
+        
+        # Dual-path vector database status
+        logger.info(f"  Knowledge base directory: {self.knowledge_base_dir}")
+        logger.info(f"  Variables DB path: {self.variables_db_path}")
+        logger.info(f"  Variables DB exists: {self.variables_db_path.exists()}")
+        logger.info(f"  Methodology DB path: {self.methodology_db_path}")
+        logger.info(f"  Methodology DB exists: {self.methodology_db_path.exists()}")
+        
+        # Legacy path
+        logger.info(f"  Legacy vector DB path: {self.vector_db_path}")
+        
         logger.info(f"  Container mode: {self.is_container}")
         logger.info(f"  Vector DB type: {self.vector_db_type}")
         logger.info(f"  Embedding model: {self.embedding_model} (local, no API key)")

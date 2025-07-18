@@ -2,10 +2,10 @@
 Census Data Mappings - Single Source of Truth
 
 Consolidates all hardcoded values from python_census_api.py into one file.
-These can eventually be replaced with dynamic API calls, but static mappings
-provide better performance and reliability for common queries.
+These "powerhouse variables" handle common queries while semantic search (65K vars) 
+handles everything else. This is a pragmatic optimization, not ideal architecture.
 
-TODO: Add API endpoints to fetch these dynamically and cache them.
+TODO: Replace with pure semantic search when confidence/coverage improves.
 """
 
 # =============================================================================
@@ -47,8 +47,7 @@ STATE_ABBREVS = {
 # Reverse mapping: full names to abbreviations
 STATE_NAMES = {v.lower(): k for k, v in STATE_ABBREVS.items()}
 
-# Major cities with known FIPS codes (fixes Baltimore bug and provides fast lookup)
-# TODO: These can be fetched dynamically from Census API and cached
+# Major cities with known FIPS codes (fixes geographic lookup issues)
 MAJOR_CITIES = {
     'new york': {'state': 'NY', 'place_fips': '51000', 'full_name': 'New York city'},
     'los angeles': {'state': 'CA', 'place_fips': '44000', 'full_name': 'Los Angeles city'},
@@ -60,77 +59,137 @@ MAJOR_CITIES = {
     'san diego': {'state': 'CA', 'place_fips': '66000', 'full_name': 'San Diego city'},
     'dallas': {'state': 'TX', 'place_fips': '19000', 'full_name': 'Dallas city'},
     'san jose': {'state': 'CA', 'place_fips': '68000', 'full_name': 'San Jose city'},
-    'baltimore': {'state': 'MD', 'place_fips': '04000', 'full_name': 'Baltimore city'},  # Note: Need to verify with actual API test
+    'baltimore': {'state': 'MD', 'place_fips': '04000', 'full_name': 'Baltimore city'},
     'detroit': {'state': 'MI', 'place_fips': '22000', 'full_name': 'Detroit city'},
     'austin': {'state': 'TX', 'place_fips': '05000', 'full_name': 'Austin city'},
     'denver': {'state': 'CO', 'place_fips': '20000', 'full_name': 'Denver city'},
     'seattle': {'state': 'WA', 'place_fips': '63000', 'full_name': 'Seattle city'},
+    'boston': {'state': 'MA', 'place_fips': '07000', 'full_name': 'Boston city'},
+    'atlanta': {'state': 'GA', 'place_fips': '04000', 'full_name': 'Atlanta city'},
+    'miami': {'state': 'FL', 'place_fips': '45000', 'full_name': 'Miami city'},
+    'boise': {'state': 'ID', 'place_fips': '08830', 'full_name': 'Boise City city'},
+}
+
+# Common city name variations (reduces geographic disambiguation issues)
+CITY_ALIASES = {
+    'nyc': 'new york',
+    'la': 'los angeles',
+    'chi town': 'chicago',
+    'motor city': 'detroit',
+    'mile high city': 'denver',
+    'big apple': 'new york',
+    'city of angels': 'los angeles',
 }
 
 # =============================================================================
-# VARIABLE MAPPINGS
+# VARIABLE MAPPINGS - "POWERHOUSE VARIABLES" FOR COMMON QUERIES
 # =============================================================================
 
 # Core demographic variables - human-readable to Census codes
+# NOTE: This is pragmatic optimization while semantic search handles 65K others
 VARIABLE_MAPPINGS = {
     # Population
     'population': 'B01003_001E',
     'total population': 'B01003_001E',
     'pop': 'B01003_001E',
     
-    # Income
+    # Age Demographics - FIXES "average age" issue
+    'median age': 'B01002_001E',
+    'average age': 'B01002_001E',  # Census uses median, not mean
+    'mean age': 'B01002_001E',
+    'age': 'B01002_001E',
+    'age distribution': 'B01001_001E',  # Sex by Age table
+    'elderly population': 'B01001_020E',  # 65 years and over
+    'senior citizens': 'B01001_020E',
+    'seniors': 'B01001_020E',
+    
+    # Income - Most queried economic indicators
     'median income': 'B19013_001E',
     'median household income': 'B19013_001E',
     'household income': 'B19013_001E',
     'income': 'B19013_001E',
     'median family income': 'B19113_001E',
     'per capita income': 'B19301_001E',
+    'individual income': 'B19301_001E',
     
-    # Housing
+    # Housing - Real estate queries
     'median home value': 'B25077_001E',
     'home value': 'B25077_001E',
+    'house value': 'B25077_001E',
     'median house value': 'B25077_001E',
+    'property value': 'B25077_001E',
     'housing units': 'B25001_001E',
     'total housing units': 'B25001_001E',
     'renter occupied': 'B25003_003E',
     'owner occupied': 'B25003_002E',
     'median rent': 'B25064_001E',
     'gross rent': 'B25064_001E',
+    'rent': 'B25064_001E',
+    'vacant housing': 'B25002_003E',
+    'occupied housing': 'B25002_002E',
+    'mobile homes': 'B25024_010E',
+    'apartment': 'B25024_003E',  # 3 or 4 units
+    'single family home': 'B25024_002E',
     
-    # Transportation variables
+    # Transportation - Commute patterns
     'commute time': 'B08303_001E',
     'travel time to work': 'B08303_001E',
     'mean travel time to work': 'B08303_001E',
     'average commute time': 'B08303_001E',
     'means of transportation to work': 'B08301_001E',
     'public transportation': 'B08301_010E',
+    'public transit': 'B08301_010E',
     'drove alone': 'B08301_003E',
     'carpooled': 'B08301_004E',
+    'work from home': 'B08301_021E',
+    'remote work': 'B08301_021E',
     
-    # Demographics
-    'median age': 'B01002_001E',
-    'age': 'B01002_001E',
-    
-    # Education
-    'high school graduation rate': 'B15003_017E',  # High school graduate (includes equivalency)
-    'college degree': 'B15003_022E',  # Bachelor's degree
-    'bachelor degree': 'B15003_022E',
-    
-    # Race/Ethnicity
-    'white alone': 'B02001_002E',
-    'black alone': 'B02001_003E',
-    'asian alone': 'B02001_005E',
-    'hispanic': 'B03003_003E',
-    'latino': 'B03003_003E',
-    
-    # Employment
+    # Employment & Labor - Economic indicators
     'unemployment': 'B23025_005E',  # Unemployed
     'labor force': 'B23025_002E',   # Labor force
     'employed': 'B23025_004E',      # Employed
+    'employment': 'B23025_004E',
+    'not in labor force': 'B23025_007E',
+    'self employed': 'B24080_007E',
+    'labor force participation': 'B23025_002E',
+    
+    # Education - Academic achievement
+    'high school graduation rate': 'B15003_017E',  # High school graduate (includes equivalency)
+    'college degree': 'B15003_022E',  # Bachelor's degree
+    'bachelor degree': 'B15003_022E',
+    'bachelors degree': 'B15003_022E',
+    'less than high school': 'B15003_002E',  # Less than 9th grade
+    'no high school': 'B15003_002E',
+    'graduate degree': 'B15003_023E',  # Master's degree
+    'masters degree': 'B15003_023E',
+    'doctoral degree': 'B15003_025E',
+    'phd': 'B15003_025E',
+    'professional degree': 'B15003_024E',
+    'college educated': 'B15003_022E',  # Bachelor's or higher
+    
+    # Race/Ethnicity - Demographics
+    'white alone': 'B02001_002E',
+    'white': 'B02001_002E',
+    'black alone': 'B02001_003E',
+    'black': 'B02001_003E',
+    'african american': 'B02001_003E',
+    'asian alone': 'B02001_005E',
+    'asian': 'B02001_005E',
+    'hispanic': 'B03003_003E',
+    'latino': 'B03003_003E',
+    'hispanic or latino': 'B03003_003E',
+    
+    # Social Services - Government assistance
+    'food stamps': 'B22003_002E',  # Households receiving SNAP
+    'snap benefits': 'B22003_002E',
+    'snap': 'B22003_002E',
+    'public assistance': 'B19057_002E',
+    'welfare': 'B19057_002E',
+    'medicaid': 'B27003_006E',  # With Medicaid coverage
 }
 
 # =============================================================================
-# RATE CALCULATIONS
+# RATE CALCULATIONS - DERIVED STATISTICS
 # =============================================================================
 
 # Calculated rates requiring numerator/denominator
@@ -145,6 +204,12 @@ RATE_CALCULATIONS = {
         'numerator': 'B23025_005E',  # Unemployed
         'denominator': 'B23025_002E',  # Labor force
         'description': 'Percentage of labor force unemployed',
+        'unit': 'percentage'
+    },
+    'employment_rate': {
+        'numerator': 'B23025_004E',  # Employed
+        'denominator': 'B23025_002E',  # Labor force
+        'description': 'Percentage of labor force employed',
         'unit': 'percentage'
     },
     'renter_occupied_rate': {
@@ -163,6 +228,36 @@ RATE_CALCULATIONS = {
         'numerator': 'B15003_022E',  # Bachelor's degree
         'denominator': 'B15003_001E',  # Total population 25 years and over
         'description': 'Percentage of population 25+ with bachelor\'s degree or higher',
+        'unit': 'percentage'
+    },
+    'college_educated_rate': {
+        'numerator': 'B15003_022E',  # Bachelor's degree
+        'denominator': 'B15003_001E',  # Total population 25+
+        'description': 'Percentage with bachelor\'s degree or higher',
+        'unit': 'percentage'
+    },
+    'food_stamp_rate': {
+        'numerator': 'B22003_002E',  # Households receiving SNAP
+        'denominator': 'B22003_001E',  # Total households
+        'description': 'Percentage of households receiving SNAP benefits',
+        'unit': 'percentage'
+    },
+    'snap_rate': {
+        'numerator': 'B22003_002E',  # Households receiving SNAP
+        'denominator': 'B22003_001E',  # Total households
+        'description': 'Percentage of households receiving SNAP benefits',
+        'unit': 'percentage'
+    },
+    'elderly_rate': {
+        'numerator': 'B01001_020E',  # 65 years and over
+        'denominator': 'B01001_001E',  # Total population
+        'description': 'Percentage of population 65 years and older',
+        'unit': 'percentage'
+    },
+    'senior_rate': {
+        'numerator': 'B01001_020E',  # 65 years and over
+        'denominator': 'B01001_001E',  # Total population
+        'description': 'Percentage of population 65 years and older',
         'unit': 'percentage'
     }
 }
@@ -191,7 +286,9 @@ def normalize_state(state_input: str) -> str:
 
 def get_major_city_info(city_name: str) -> dict:
     """Get major city information including FIPS codes."""
-    return MAJOR_CITIES.get(city_name.lower())
+    # Check for aliases first
+    normalized_city = CITY_ALIASES.get(city_name.lower(), city_name.lower())
+    return MAJOR_CITIES.get(normalized_city)
 
 def is_rate_calculation(variable: str) -> bool:
     """Check if variable requires rate calculation."""
@@ -233,5 +330,6 @@ VARIABLE_ALIASES = {
     'unemployment': ['unemployment rate', 'unemployment_rate', 'jobless rate'],
     'housing': ['housing units', 'total housing units'],
     'rent': ['median rent', 'gross rent'],
-    'home value': ['median home value', 'house value', 'median house value']
+    'home value': ['median home value', 'house value', 'median house value'],
+    'age': ['median age', 'average age', 'mean age']
 }

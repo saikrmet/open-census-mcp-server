@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Dual-Path Knowledge Base Builder - Variables vs Methodology Separation
+Dual-Path Knowledge Base Builder - Concept-Based Variables Architecture
 Builds TWO separate vector databases optimized for different retrieval patterns:
 
-1. VARIABLES DATABASE: 65K canonical variables → FAISS index (fast loading) OR ChromaDB
+1. VARIABLES DATABASE: 36K concept-based variables → FAISS index (fast loading) OR ChromaDB
 2. METHODOLOGY DATABASE: Documentation, guides, PDFs → ChromaDB (conceptual search)
 
+Key Update: Handles canonical_variables_refactored.json with concept-based structure
+- Eliminates duplicate variables (65K → 36K concepts)
+- Survey instance awareness (ACS1/5yr as instances, not separate variables)
+- Rich metadata preservation for intelligent search
+
 Usage:
-    python build-kb.py --variables-only --output-dir variables-db --faiss
-    python build-kb.py --methodology-only --output-dir methodology-db
-    python build-kb.py --both --variables-dir variables-db --methodology-dir methodology-db --faiss
+    python build-kb-concept-based.py --variables-only --output-dir variables-db --faiss
+    python build-kb-concept-based.py --methodology-only --output-dir methodology-db
+    python build-kb-concept-based.py --both --variables-dir variables-db --methodology-dir methodology-db --faiss
 """
 
 import os
@@ -20,7 +25,7 @@ import argparse
 import hashlib
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import time
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
@@ -290,11 +295,16 @@ def worker_process_files(files_chunk, worker_id, source_dir, temp_dir, model_nam
     print(f"✅ Worker {worker_id}: COMPLETE - {files_processed} files, {len(all_chunks)} chunks, {errors} errors")
     return {'files_processed': files_processed, 'chunks_created': len(all_chunks), 'errors': errors}
 
-class DualPathKnowledgeBuilder:
+class ConceptBasedKnowledgeBuilder:
     """
     Builds separated knowledge bases optimized for different retrieval patterns:
-    - Variables DB: Entity lookup for 65K canonical variables
+    - Variables DB: Entity lookup for 36K concept-based variables (no duplicates)
     - Methodology DB: Conceptual search for documentation
+    
+    Key improvements:
+    - Handles canonical_variables_refactored.json structure
+    - Survey instance awareness (ACS1/5yr metadata)
+    - Rich metadata preservation for intelligent search
     """
     
     def __init__(self, source_dir: Path, build_mode: str,
@@ -311,7 +321,13 @@ class DualPathKnowledgeBuilder:
         self.workers = workers
         
         # Stats tracking
-        self.variables_stats = {'canonical_variables': 0, 'files_processed': 0, 'chunks_created': 0, 'errors': 0}
+        self.variables_stats = {
+            'concepts_processed': 0,
+            'survey_instances_processed': 0,
+            'files_processed': 0,
+            'chunks_created': 0,
+            'errors': 0
+        }
         self.methodology_stats = {'files_processed': 0, 'chunks_created': 0, 'errors': 0}
         
         # Initialize model
@@ -327,12 +343,13 @@ class DualPathKnowledgeBuilder:
             logger.error("FAISS requested but not available. Install with: pip install faiss-cpu")
             raise ImportError("FAISS not available")
         
-        logger.info(f"🚀 Dual-Path Builder initialized:")
+        logger.info(f"🚀 Concept-Based Knowledge Builder initialized:")
         logger.info(f"   Build mode: {build_mode}")
         logger.info(f"   Variables dir: {variables_dir}")
         logger.info(f"   Variables backend: {'FAISS' if self.use_faiss else 'ChromaDB'}")
         logger.info(f"   Methodology dir: {methodology_dir}")
         logger.info(f"   Test mode: {test_mode}")
+        logger.info(f"   🎯 CONCEPT-BASED: Handles refactored canonical variables")
     
     def _init_model(self):
         """Initialize embedding model with local caching"""
@@ -362,7 +379,7 @@ class DualPathKnowledgeBuilder:
             except:
                 self.variables_collection = self.variables_client.create_collection(
                     "census_variables",
-                    metadata={"description": "Census canonical variables for entity lookup"}
+                    metadata={"description": "Census concept-based variables for entity lookup"}
                 )
             logger.info(f"✅ Variables database initialized: {self.variables_dir}")
         
@@ -383,14 +400,14 @@ class DualPathKnowledgeBuilder:
     
     def build_knowledge_bases(self, rebuild: bool = False):
         """Build the knowledge bases according to the specified mode"""
-        logger.info(f"🚀 Building knowledge bases - Mode: {self.build_mode}")
+        logger.info(f"🚀 Building concept-based knowledge bases - Mode: {self.build_mode}")
         start_time = time.time()
         
         if rebuild:
             self._rebuild_collections()
         
         if self.build_mode in ['variables', 'both']:
-            logger.info("🎯 Building VARIABLES database...")
+            logger.info("🎯 Building CONCEPT-BASED VARIABLES database...")
             self._build_variables_database()
         
         if self.build_mode in ['methodology', 'both']:
@@ -418,7 +435,7 @@ class DualPathKnowledgeBuilder:
                         self.variables_client.delete_collection("census_variables")
                         self.variables_collection = self.variables_client.create_collection(
                             "census_variables",
-                            metadata={"description": "Census canonical variables for entity lookup"}
+                            metadata={"description": "Census concept-based variables for entity lookup"}
                         )
                         logger.info("🔄 Variables collection rebuilt")
                     except:
@@ -436,80 +453,261 @@ class DualPathKnowledgeBuilder:
                 pass
     
     def _build_variables_database(self):
-        """Build variables database using FAISS or ChromaDB"""
-        canonical_path = self.source_dir / "canonical_variables.json"
+        """Build variables database using concept-based structure"""
+        # Look for refactored canonical variables first, fallback to original
+        canonical_path = self.source_dir / "canonical_variables_refactored.json"
         if not canonical_path.exists():
-            logger.error("❌ No canonical_variables.json found - cannot build variables database")
+            canonical_path = self.source_dir / "canonical_variables.json"
+            logger.warning("⚠️  Using original canonical_variables.json - refactored version not found")
+            logger.warning("⚠️  Consider running refactor script first for optimal performance")
+        
+        if not canonical_path.exists():
+            logger.error("❌ No canonical variables file found - cannot build variables database")
             return
+        
+        logger.info(f"📁 Using canonical variables: {canonical_path.name}")
         
         if self.use_faiss:
             self._build_variables_faiss(canonical_path)
         else:
             self._build_variables_chromadb(canonical_path)
     
-    def _build_variables_faiss(self, canonical_path: Path):
-        """Build variables database using FAISS index"""
-        logger.info("🎯 Processing canonical variables for FAISS database...")
+    def _is_refactored_structure(self, data: dict) -> bool:
+        """Detect if this is the refactored concept-based structure"""
+        # Check for refactored structure indicators
+        if 'metadata' in data and 'concepts' in data:
+            return True
         
+        # Check if any top-level entries have 'instances' array
+        for key, value in data.items():
+            if isinstance(value, dict) and 'instances' in value:
+                return True
+        
+        return False
+    
+    def _load_canonical_variables(self, canonical_path: Path) -> tuple[dict, bool]:
+        """Load canonical variables and detect structure type"""
         with open(canonical_path) as f:
             data = json.load(f)
         
-        variables = data.get('variables', data)
-        logger.info(f"📊 Found {len(variables)} canonical variables")
+        is_refactored = self._is_refactored_structure(data)
+        
+        if is_refactored:
+            logger.info("🎯 Detected CONCEPT-BASED structure (refactored)")
+            concepts = data.get('concepts', {})
+            if not concepts:
+                # Handle case where concepts are at root level
+                concepts = {k: v for k, v in data.items() if k != 'metadata' and isinstance(v, dict)}
+        else:
+            logger.info("📦 Detected TEMPORAL structure (original)")
+            concepts = data.get('variables', data)
+        
+        return concepts, is_refactored
+    
+    def _create_concept_embedding_text(self, variable_id: str, concept_data: dict, is_refactored: bool) -> tuple[str, dict]:
+        """Create optimized embedding text and metadata for a concept - SUMMARY-FIRST VERSION
+        
+        Prioritizes search-optimized summaries while preserving all Census precision and semantic intelligence.
+        Order: Summary → Key Terms → Administrative Precision → Full Enrichment → Domain Context
+        """
+        
+        if is_refactored:
+            # OPTIMIZED ORDERING FOR SEARCH RELEVANCE
+            parts = []
+            
+            # 1. SUMMARY FIRST (search-optimized signal gets highest embedding weight)
+            summary = concept_data.get('summary', '')
+            if summary:
+                parts.append(summary)
+                logger.debug(f"Added summary: {len(summary)} chars for {variable_id}")
+            
+            # 2. KEY TERMS (only if NOT already in summary to avoid repetition)
+            key_terms = concept_data.get('key_terms', [])
+            if key_terms and summary:
+                # Filter out terms already in summary to avoid dilution
+                summary_lower = summary.lower()
+                unique_terms = [term for term in key_terms if term.lower() not in summary_lower]
+                if unique_terms:
+                    parts.append(f"Key search terms: {', '.join(unique_terms)}")
+                    logger.debug(f"Added {len(unique_terms)} unique key terms for {variable_id}")
+            elif key_terms and not summary:
+                # If no summary, include all key terms
+                parts.append(f"Key search terms: {', '.join(key_terms)}")
+                logger.debug(f"Added {len(key_terms)} key terms for {variable_id}")
+            
+            # 3. CENSUS ADMINISTRATIVE PRECISION (essential technical vocabulary)
+            parts.append(f"Census variable identifier: {variable_id}")
+            
+            concept = concept_data.get('concept', 'Unknown')
+            label = concept_data.get('label', 'Unknown')
+            
+            if concept != 'Unknown':
+                parts.append(f"Official Census concept: {concept}")
+            if label != 'Unknown':
+                parts.append(f"Official Census label: {label}")
+            
+            # 4. FULL ENRICHMENT TEXT (preserve your $160 semantic intelligence)
+            enrichment = concept_data.get('enrichment_text', '')
+            if enrichment:
+                parts.append(enrichment)  # Keep ALL the expensive analysis
+                logger.debug(f"Added full enrichment text: {len(enrichment)} chars for {variable_id}")
+            
+            # 5. CATEGORY WEIGHTS (domain expertise context)
+            weights = concept_data.get('category_weights_linear', {})
+            if weights:
+                # Keep your existing nuanced threshold
+                weight_strs = [f"{k}: {v:.2f}" for k, v in weights.items() if v > 0.05]
+                if weight_strs:
+                    parts.append(f"Domain expertise: {', '.join(weight_strs)}")
+                    logger.debug(f"Added {len(weight_strs)} category weights for {variable_id}")
+            
+            # 6. SURVEY METHODOLOGY INTELLIGENCE (controlled to avoid verbosity)
+            instances = concept_data.get('instances', [])
+            if instances:
+                # Add survey type summary first (most useful)
+                survey_types = list(set(inst.get('survey_type', '') for inst in instances))
+                if survey_types:
+                    parts.append(f"Available surveys: {', '.join(filter(None, survey_types))}")
+                
+                # Add unique datasets and sample characteristics (avoid repetition)
+                datasets = list(set(inst.get('dataset', '') for inst in instances if inst.get('dataset')))
+                if datasets:
+                    parts.append(f"Survey datasets: {', '.join(datasets)}")
+                
+                # Add unique sample characteristics (condensed)
+                sample_chars = list(set(inst.get('sample_characteristics', '') for inst in instances if inst.get('sample_characteristics')))
+                if sample_chars:
+                    # Take only the first unique characteristic to avoid verbosity
+                    parts.append(f"Survey methodology: {sample_chars[0]}")
+                    
+                logger.debug(f"Added survey context for {len(instances)} instances")
+            
+            # Create comprehensive metadata with rich context (preserved from original)
+            metadata = {
+                'variable_id': variable_id,
+                'concept': concept,
+                'label': label,
+                'source_file': 'canonical_variables_refactored.json',
+                'category': 'canonical_variables',
+                'structure_type': 'concept_based',
+                'available_surveys': concept_data.get('available_surveys', []),
+                'geography_coverage': str(concept_data.get('geography_coverage', {})),
+                'primary_instance': concept_data.get('primary_instance', ''),
+                'instance_count': len(instances),
+                'enrichment_length': len(enrichment),
+                'category_count': len(weights),
+                'has_full_enrichment': len(enrichment) > 1000,
+                'has_summary': bool(summary),
+                'summary_length': len(summary) if summary else 0,
+                'key_terms_count': len(key_terms) if key_terms else 0
+            }
+            
+            # Track survey instance processing (preserved from original)
+            self.variables_stats['survey_instances_processed'] += len(instances)
+            
+        else:
+            # Original temporal structure - apply same principles
+            temporal_id = variable_id
+            parts = []
+            
+            # 1. Summary first (if available)
+            summary = concept_data.get('summary', '')
+            if summary:
+                parts.append(summary)
+            
+            # 2. Key terms
+            key_terms = concept_data.get('key_terms', [])
+            if key_terms:
+                if summary:
+                    summary_lower = summary.lower()
+                    unique_terms = [term for term in key_terms if term.lower() not in summary_lower]
+                    if unique_terms:
+                        parts.append(f"Key search terms: {', '.join(unique_terms)}")
+                else:
+                    parts.append(f"Key search terms: {', '.join(key_terms)}")
+            
+            # 3. Administrative identifiers
+            parts.append(f"Variable {temporal_id}")
+            
+            concept = concept_data.get('concept', 'Unknown')
+            label = concept_data.get('label', 'Unknown')
+            
+            if concept != 'Unknown':
+                parts.append(f"Concept: {concept}")
+            if label != 'Unknown':
+                parts.append(f"Label: {label}")
+            
+            # 4. Full enrichment (no truncation)
+            enrichment = concept_data.get('enrichment_text', '')
+            if enrichment:
+                parts.append(enrichment)
+            
+            # 5. Category weights
+            weights = concept_data.get('category_weights_linear', {})
+            if weights:
+                weight_strs = [f"{k}: {v:.2f}" for k, v in weights.items() if v > 0.05]
+                if weight_strs:
+                    parts.append(f"Categories: {', '.join(weight_strs)}")
+            
+            # 6. Survey context
+            if concept_data.get('survey_context'):
+                parts.append(f"Survey: {concept_data['survey_context']}")
+            
+            metadata = {
+                'temporal_id': temporal_id,
+                'variable_id': concept_data.get('variable_id', ''),
+                'concept': concept,
+                'label': label,
+                'source_file': 'canonical_variables.json',
+                'category': 'canonical_variables',
+                'structure_type': 'temporal_based',
+                'has_summary': bool(summary),
+                'has_enrichment': bool(enrichment)
+            }
+        
+        # Join all parts into rich embedding text
+        text = ". ".join(parts) + "."
+        
+        # Enhanced logging
+        if is_refactored:
+            logger.debug(f"✅ Summary-first embedding created for {variable_id}: "
+                       f"Summary: {len(summary) if summary else 0} chars, "
+                       f"Enrichment: {len(enrichment) if enrichment else 0} chars, "
+                       f"Categories: {len(weights)}, "
+                       f"Survey instances: {len(instances)}")
+        
+        return text, metadata
+    
+    def _build_variables_faiss(self, canonical_path: Path):
+        """Build concept-based variables database using FAISS index"""
+        logger.info("🎯 Processing canonical variables for FAISS database...")
+        
+        concepts, is_refactored = self._load_canonical_variables(canonical_path)
+        logger.info(f"📊 Found {len(concepts)} {'concepts' if is_refactored else 'temporal variables'}")
         
         # Process variables in batches for memory efficiency
-        var_items = list(variables.items())
+        concept_items = list(concepts.items())
         if self.test_mode:
-            var_items = var_items[:1000]
-            logger.info(f"🧪 Test mode: Limited to {len(var_items)} variables")
+            concept_items = concept_items[:1000]
+            logger.info(f"🧪 Test mode: Limited to {len(concept_items)} variables")
         
         all_texts = []
         all_metadata = []
         all_embeddings = []
         
         batch_size = 1000
-        total_batches = (len(var_items) + batch_size - 1) // batch_size
+        total_batches = (len(concept_items) + batch_size - 1) // batch_size
         
-        for batch_num, i in enumerate(range(0, len(var_items), batch_size)):
-            batch = var_items[i:i + batch_size]
+        for batch_num, i in enumerate(range(0, len(concept_items), batch_size)):
+            batch = concept_items[i:i + batch_size]
             logger.info(f"🔄 Processing FAISS batch {batch_num + 1}/{total_batches}")
             
             batch_texts = []
             batch_metadata = []
             
-            for temporal_id, var_data in batch:
-                # Create optimized variable text for entity lookup
-                parts = [f"Variable {temporal_id}"]
-                
-                label = var_data.get('label', 'Unknown')
-                concept = var_data.get('concept', 'Unknown')
-                
-                if label != 'Unknown':
-                    parts.append(f"Label: {label}")
-                if concept != 'Unknown':
-                    parts.append(f"Concept: {concept}")
-                
-                # Add context for better search
-                if var_data.get('survey_context'):
-                    parts.append(f"Survey: {var_data['survey_context']}")
-                
-                # Add top category weights for semantic understanding
-                weights = var_data.get('category_weights_linear', {})
-                if weights:
-                    weight_strs = [f"{k}: {v:.2f}" for k, v in weights.items() if v > 0.1]
-                    if weight_strs:
-                        parts.append(f"Categories: {', '.join(weight_strs)}")
-                
-                text = ". ".join(parts) + "."
-                
-                metadata = {
-                    'temporal_id': temporal_id,
-                    'variable_id': var_data.get('variable_id', ''),
-                    'concept': concept,
-                    'label': label,
-                    'source_file': 'canonical_variables.json',
-                    'category': 'canonical_variables'
-                }
+            for variable_id, concept_data in batch:
+                # Create optimized embedding text and metadata
+                text, metadata = self._create_concept_embedding_text(variable_id, concept_data, is_refactored)
                 
                 batch_texts.append(text)
                 batch_metadata.append(metadata)
@@ -522,7 +720,7 @@ class DualPathKnowledgeBuilder:
             all_metadata.extend(batch_metadata)
             all_embeddings.extend(embeddings)
             
-            self.variables_stats['canonical_variables'] += len(batch_texts)
+            self.variables_stats['concepts_processed'] += len(batch_texts)
         
         # Build FAISS index
         logger.info(f"🔧 Building FAISS index for {len(all_embeddings)} variables...")
@@ -553,8 +751,11 @@ class DualPathKnowledgeBuilder:
             'model_name': self.model_name,
             'embedding_dimension': dimension,
             'variable_count': len(all_embeddings),
+            'structure_type': 'concept_based' if is_refactored else 'temporal_based',
+            'source_file': canonical_path.name,
             'build_timestamp': time.time(),
-            'index_type': 'faiss_flat_l2'
+            'index_type': 'faiss_flat_l2',
+            'survey_instances_processed': self.variables_stats['survey_instances_processed']
         }
         
         build_info_path = self.variables_dir / "build_info.json"
@@ -562,71 +763,41 @@ class DualPathKnowledgeBuilder:
             json.dump(build_info, f, indent=2)
         logger.info(f"💾 Build info saved: {build_info_path}")
         
-        logger.info(f"✅ FAISS variables database complete: {len(all_embeddings)} variables")
+        structure_note = "concept-based variables" if is_refactored else "temporal variables"
+        logger.info(f"✅ FAISS variables database complete: {len(all_embeddings)} {structure_note}")
     
     def _build_variables_chromadb(self, canonical_path: Path):
-        """Build variables database using ChromaDB (original method)"""
+        """Build concept-based variables database using ChromaDB"""
         logger.info("🎯 Processing canonical variables for ChromaDB database...")
         
-        with open(canonical_path) as f:
-            data = json.load(f)
-        
-        variables = data.get('variables', data)
-        logger.info(f"📊 Found {len(variables)} canonical variables")
+        concepts, is_refactored = self._load_canonical_variables(canonical_path)
+        logger.info(f"📊 Found {len(concepts)} {'concepts' if is_refactored else 'temporal variables'}")
         
         # Process in batches
-        var_items = list(variables.items())
+        concept_items = list(concepts.items())
         batch_size = 200 if self.test_mode else 1000
-        total_batches = (len(var_items) + batch_size - 1) // batch_size
+        total_batches = (len(concept_items) + batch_size - 1) // batch_size
         
         if self.test_mode:
-            var_items = var_items[:1000]
-            logger.info(f"🧪 Test mode: Limited to {len(var_items)} variables")
+            concept_items = concept_items[:1000]
+            logger.info(f"🧪 Test mode: Limited to {len(concept_items)} variables")
         
-        for batch_num, i in enumerate(range(0, len(var_items), batch_size)):
-            batch = var_items[i:i + batch_size]
+        for batch_num, i in enumerate(range(0, len(concept_items), batch_size)):
+            batch = concept_items[i:i + batch_size]
             
             logger.info(f"🔄 Processing variables batch {batch_num + 1}/{total_batches}")
                 
             chunks = []
-            for temporal_id, var_data in batch:
-                # Create optimized variable text for entity lookup
-                parts = [f"Variable {temporal_id}"]
+            for variable_id, concept_data in batch:
+                # Create optimized embedding text and metadata
+                text, metadata = self._create_concept_embedding_text(variable_id, concept_data, is_refactored)
                 
-                label = var_data.get('label', 'Unknown')
-                concept = var_data.get('concept', 'Unknown')
-                
-                if label != 'Unknown':
-                    parts.append(f"Label: {label}")
-                if concept != 'Unknown':
-                    parts.append(f"Concept: {concept}")
-                
-                # Add context for better search
-                if var_data.get('survey_context'):
-                    parts.append(f"Survey: {var_data['survey_context']}")
-                
-                # Add top category weights for semantic understanding
-                weights = var_data.get('category_weights_linear', {})
-                if weights:
-                    weight_strs = [f"{k}: {v:.2f}" for k, v in weights.items() if v > 0.1]
-                    if weight_strs:
-                        parts.append(f"Categories: {', '.join(weight_strs)}")
-                
-                text = ". ".join(parts) + "."
-                chunk_id = f"var_{temporal_id}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
+                chunk_id = f"var_{variable_id}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
                 
                 chunks.append({
                     'id': chunk_id,
                     'text': text,
-                    'metadata': {
-                        'source_file': 'canonical_variables.json',
-                        'category': 'canonical_variables',
-                        'temporal_id': temporal_id,
-                        'variable_id': var_data.get('variable_id', ''),
-                        'file_type': 'canonical_variable',
-                        'concept': concept,
-                        'label': label
-                    }
+                    'metadata': metadata
                 })
             
             # Generate embeddings and store
@@ -652,9 +823,10 @@ class DualPathKnowledgeBuilder:
                     
                     logger.info(f"💾 Variables: Stored batch {j//500 + 1}: {len(batch_chunks)} variables")
                 
-                self.variables_stats['canonical_variables'] += len(chunks)
+                self.variables_stats['concepts_processed'] += len(chunks)
         
-        logger.info(f"✅ Variables database complete: {self.variables_stats['canonical_variables']} variables")
+        structure_note = "concept-based variables" if is_refactored else "temporal variables"
+        logger.info(f"✅ Variables database complete: {self.variables_stats['concepts_processed']} {structure_note}")
     
     def _build_methodology_database(self):
         """Build methodology-only database from documentation files"""
@@ -662,14 +834,15 @@ class DualPathKnowledgeBuilder:
         temp_dir = self.methodology_dir / "temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Collect methodology files (exclude canonical_variables.json)
+        # Collect methodology files (exclude canonical_variables files)
         logger.info("📁 Collecting methodology files...")
         all_files = []
         patterns = ['*.pdf', '*.html', '*.htm', '*.md', '*.txt', '*.Rmd', '*.xlsx']
         
-        # Exclude raw data files and focus on documentation
+        # Exclude canonical variables files and focus on documentation
         exclude_patterns = [
             'canonical_variables.json',
+            'canonical_variables_refactored.json',
             'acs1_raw.json',
             'acs5_raw.json',
             'raw_data',
@@ -781,27 +954,40 @@ class DualPathKnowledgeBuilder:
     
     def _display_final_stats(self, build_time):
         """Display comprehensive build statistics"""
-        logger.info("🎉 DUAL-PATH BUILD COMPLETE!")
-        logger.info("=" * 60)
+        logger.info("🎉 CONCEPT-BASED DUAL-PATH BUILD COMPLETE!")
+        logger.info("=" * 70)
         logger.info(f"Build time: {build_time:.2f}s")
         logger.info(f"Build mode: {self.build_mode}")
         
         if self.build_mode in ['variables', 'both']:
             backend_type = "FAISS" if self.use_faiss else "ChromaDB"
-            logger.info(f"\n🎯 VARIABLES DATABASE ({self.variables_dir}) - {backend_type}:")
-            logger.info(f"   Canonical variables: {self.variables_stats['canonical_variables']:,}")
+            logger.info(f"\n🎯 CONCEPT-BASED VARIABLES DATABASE ({self.variables_dir}) - {backend_type}:")
+            logger.info(f"   Concepts processed: {self.variables_stats['concepts_processed']:,}")
+            logger.info(f"   Survey instances processed: {self.variables_stats['survey_instances_processed']:,}")
             
             if self.use_faiss:
                 faiss_path = self.variables_dir / "variables.faiss"
                 metadata_path = self.variables_dir / "variables_metadata.json"
+                build_info_path = self.variables_dir / "build_info.json"
+                
                 logger.info(f"   FAISS index: {faiss_path}")
                 logger.info(f"   Metadata file: {metadata_path}")
+                logger.info(f"   Build info: {build_info_path}")
+                
                 if faiss_path.exists():
                     size_mb = faiss_path.stat().st_size / 1024 / 1024
                     logger.info(f"   Index size: {size_mb:.1f} MB")
+                
+                # Show structure type from build info
+                if build_info_path.exists():
+                    with open(build_info_path) as f:
+                        build_info = json.load(f)
+                    structure_type = build_info.get('structure_type', 'unknown')
+                    logger.info(f"   Structure type: {structure_type}")
             else:
                 if self.variables_collection:
-                    logger.info(f"   Total documents: {self.variables_collection.count():,}")
+                    total_docs = self.variables_collection.count()
+                    logger.info(f"   Total documents: {total_docs:,}")
         
         if self.build_mode in ['methodology', 'both']:
             logger.info(f"\n📚 METHODOLOGY DATABASE ({self.methodology_dir}) - ChromaDB:")
@@ -809,20 +995,27 @@ class DualPathKnowledgeBuilder:
             logger.info(f"   Chunks created: {self.methodology_stats['chunks_created']:,}")
             logger.info(f"   Errors: {self.methodology_stats['errors']}")
             if self.methodology_collection:
-                logger.info(f"   Total documents: {self.methodology_collection.count():,}")
+                total_docs = self.methodology_collection.count()
+                logger.info(f"   Total documents: {total_docs:,}")
+        
+        logger.info(f"\n🎯 KEY IMPROVEMENTS:")
+        logger.info(f"   ✅ Concept-based structure (eliminates duplicates)")
+        logger.info(f"   ✅ Survey instance awareness (ACS1/5yr metadata)")
+        logger.info(f"   ✅ Rich metadata preservation for intelligent search")
+        logger.info(f"   ✅ Automatic structure detection and handling")
         
         logger.info(f"\n💡 NEXT STEPS:")
         if self.build_mode in ['variables', 'both']:
             if self.use_faiss:
-                logger.info(f"   Variables: FAISS index for lightning-fast entity lookup")
+                logger.info(f"   Variables: FAISS index for lightning-fast concept lookup")
             else:
-                logger.info(f"   Variables: ChromaDB for entity lookup and GraphRAG potential")
+                logger.info(f"   Variables: ChromaDB for concept lookup and GraphRAG potential")
         if self.build_mode in ['methodology', 'both']:
             logger.info(f"   Methodology: ChromaDB optimized for conceptual search")
-        logger.info(f"   Ready for MCP server integration with fast startup!")
+        logger.info(f"   Ready for MCP server integration with concept-based intelligence!")
 
 def main():
-    parser = argparse.ArgumentParser(description='Dual-Path Knowledge Base Builder')
+    parser = argparse.ArgumentParser(description='Concept-Based Dual-Path Knowledge Base Builder')
     parser.add_argument('--variables-only', action='store_true', help='Build only variables database')
     parser.add_argument('--methodology-only', action='store_true', help='Build only methodology database')
     parser.add_argument('--both', action='store_true', help='Build both databases')
@@ -854,7 +1047,7 @@ def main():
         logger.warning("FAISS flag ignored - only applies to variables database")
         args.faiss = False
     
-    builder = DualPathKnowledgeBuilder(
+    builder = ConceptBasedKnowledgeBuilder(
         source_dir=Path(args.source_dir),
         build_mode=build_mode,
         variables_dir=Path(args.variables_dir),
@@ -866,7 +1059,7 @@ def main():
     )
     
     builder.build_knowledge_bases(rebuild=args.rebuild)
-    logger.info("🚀 Dual-path knowledge base build completed!")
+    logger.info("🚀 Concept-based dual-path knowledge base build completed!")
 
 if __name__ == "__main__":
     main()

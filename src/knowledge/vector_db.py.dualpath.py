@@ -4,8 +4,9 @@ Dual-Path Vector Database for Census MCP Server
 
 Handles separated RAG functionality using:
 - Sentence transformers for high-quality local embeddings (NO API key required)
-- FAISS for variables database (instant loading)
-- ChromaDB for methodology database (conceptual search)
+- TWO ChromaDB collections optimized for different retrieval patterns:
+  1. Variables DB: 65K canonical variables → entity lookup, GraphRAG potential
+  2. Methodology DB: Documentation, guides, PDFs → conceptual search
 - Location parsing and geographic knowledge
 - Smart query routing based on content type
 """
@@ -15,7 +16,6 @@ import json
 import logging
 import os
 import re
-import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import hashlib
@@ -28,13 +28,6 @@ try:
 except ImportError:
     CHROMADB_AVAILABLE = False
     logging.warning("ChromaDB not available. Install with: pip install chromadb")
-
-try:
-    import faiss
-    FAISS_AVAILABLE = True
-except ImportError:
-    FAISS_AVAILABLE = False
-    logging.warning("FAISS not available. Install with: pip install faiss-cpu")
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -52,8 +45,8 @@ class DualPathKnowledgeBase:
     Dual-path vector database for optimized Census expertise retrieval.
     
     Provides:
-    - Variables database: FAISS for instant loading and entity lookup
-    - Methodology database: ChromaDB for conceptual search
+    - Variables database: Optimized for entity lookup (variable IDs, concepts)
+    - Methodology database: Optimized for conceptual search (documentation, guides)
     - Smart query routing based on query type detection
     - Location parsing and geographic knowledge
     - Unified interface for seamless integration
@@ -67,24 +60,16 @@ class DualPathKnowledgeBase:
         Initialize dual-path knowledge base.
         
         Args:
-            variables_db_path: Path to variables FAISS database
-            methodology_db_path: Path to methodology ChromaDB database  
+            variables_db_path: Path to variables vector database
+            methodology_db_path: Path to methodology vector database  
             corpus_path: Path to legacy corpus (for compatibility)
         """
         self.config = get_config()
         
         # Database paths from config
-        self.variables_db_path = variables_db_path or (self.config.base_dir / "knowledge-base" / "variables-faiss")
-        self.methodology_db_path = methodology_db_path or (self.config.base_dir / "knowledge-base" / "methodology-db")
+        self.variables_db_path = variables_db_path or self.config.variables_db_path
+        self.methodology_db_path = methodology_db_path or self.config.methodology_db_path
         self.corpus_path = corpus_path  # Keep for legacy compatibility but not used
-        
-        # FAISS components for variables
-        self.variables_index = None
-        self.variables_metadata = None
-        
-        # ChromaDB components for methodology
-        self.methodology_client = None
-        self.methodology_collection = None
         
         # Initialize components
         self._init_embedding_model()
@@ -106,80 +91,48 @@ class DualPathKnowledgeBase:
             # Use the same model that built the databases
             model_name = 'sentence-transformers/all-mpnet-base-v2'  # 768-dim
             
-            logger.info(f"Loading embedding model: {model_name}")
+            logger.info(f"Loading sentence transformer model: {model_name}")
             
             # Load sentence transformer model (uses cached version)
             self.embedding_model = SentenceTransformer(model_name, cache_folder='./model_cache')
             self.model_name = model_name
             self.embedding_dimension = self.embedding_model.get_sentence_embedding_dimension()
             
-            logger.info(f"✅ Embedding model loaded successfully")
+            logger.info(f"✅ Sentence transformer model loaded successfully")
             logger.info(f"   Model: {model_name}")
             logger.info(f"   Dimensions: {self.embedding_dimension}")
             
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {str(e)}")
+            logger.error(f"Failed to load sentence transformer model: {str(e)}")
             self.embedding_model = None
             self.model_name = None
     
     def _init_dual_vector_dbs(self):
-        """Initialize FAISS for variables and ChromaDB for methodology."""
-        
-        # Initialize Variables Database with FAISS
-        self._init_variables_faiss()
-        
-        # Initialize Methodology Database with ChromaDB
-        self._init_methodology_chromadb()
-        
-        # Log final status
-        var_count = len(self.variables_metadata) if self.variables_metadata else 0
-        method_count = self.methodology_collection.count() if self.methodology_collection else 0
-        
-        logger.info(f"Variables database: {var_count:,} variables (FAISS)")
-        logger.info(f"Methodology database: {method_count:,} documents (ChromaDB)")
-    
-    def _init_variables_faiss(self):
-        """Initialize FAISS variables database for instant loading."""
-        if not FAISS_AVAILABLE:
-            logger.warning("FAISS not available - variables search disabled")
-            return
-        
-        try:
-            # Check for FAISS files from handoff note
-            faiss_index_path = self.variables_db_path / "variables.faiss"
-            metadata_path = self.variables_db_path / "variables_metadata.json"
-            
-            if faiss_index_path.exists() and metadata_path.exists():
-                # Load FAISS index
-                self.variables_index = faiss.read_index(str(faiss_index_path))
-                
-                # Load metadata
-                with open(metadata_path, 'r') as f:
-                    self.variables_metadata = json.load(f)
-                
-                logger.info(f"✅ Variables FAISS loaded: {len(self.variables_metadata):,} variables")
-                
-            else:
-                logger.warning(f"FAISS files not found at {self.variables_db_path}")
-                logger.warning("Expected: variables.faiss + variables_metadata.json")
-                self.variables_index = None
-                self.variables_metadata = None
-                
-        except Exception as e:
-            logger.error(f"Failed to load FAISS variables database: {str(e)}")
-            self.variables_index = None
-            self.variables_metadata = None
-    
-    def _init_methodology_chromadb(self):
-        """Initialize ChromaDB methodology database."""
+        """Initialize both ChromaDB collections for dual-path retrieval."""
         if not CHROMADB_AVAILABLE:
-            logger.warning("ChromaDB not available - methodology search disabled")
+            logger.error("ChromaDB not available. Vector search disabled.")
+            self.variables_client = None
             self.methodology_client = None
+            self.variables_collection = None
             self.methodology_collection = None
             return
         
         try:
-            # Initialize Methodology Database (unchanged from original)
+            # Initialize Variables Database
+            if self.variables_db_path.exists():
+                self.variables_client = chromadb.PersistentClient(
+                    path=str(self.variables_db_path),
+                    settings=Settings(anonymized_telemetry=False, allow_reset=False)
+                )
+                self.variables_collection = self.variables_client.get_collection("census_variables")
+                var_count = self.variables_collection.count()
+                logger.info(f"✅ Variables DB loaded: {var_count:,} variables")
+            else:
+                logger.warning(f"Variables database not found at {self.variables_db_path}")
+                self.variables_client = None
+                self.variables_collection = None
+            
+            # Initialize Methodology Database
             if self.methodology_db_path.exists():
                 self.methodology_client = chromadb.PersistentClient(
                     path=str(self.methodology_db_path),
@@ -194,8 +147,10 @@ class DualPathKnowledgeBase:
                 self.methodology_collection = None
             
         except Exception as e:
-            logger.error(f"Failed to initialize methodology database: {str(e)}")
+            logger.error(f"Failed to initialize vector databases: {str(e)}")
+            self.variables_client = None
             self.methodology_client = None
+            self.variables_collection = None
             self.methodology_collection = None
     
     def _init_variable_contexts(self):
@@ -312,7 +267,7 @@ class DualPathKnowledgeBase:
     async def search_variables(self, query: str, context: str = "",
                              top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Search variables database using FAISS for instant results.
+        Search variables database for entity lookup.
         
         Args:
             query: Search query
@@ -322,8 +277,8 @@ class DualPathKnowledgeBase:
         Returns:
             List of relevant variables with metadata
         """
-        if not self.embedding_model or not self.variables_index or not self.variables_metadata:
-            logger.warning("Cannot search variables: FAISS index or embedding model not available")
+        if not self.embedding_model or not self.variables_collection:
+            logger.warning("Cannot search variables: embedding model or variables DB not available")
             return []
         
         try:
@@ -332,35 +287,35 @@ class DualPathKnowledgeBase:
             top_k = top_k or 10
             
             # Generate query embedding
-            query_embedding = self.embedding_model.encode([search_text], normalize_embeddings=True)
+            query_embedding = self.embedding_model.encode([search_text])
             
-            # Search FAISS index
-            distances, indices = self.variables_index.search(
-                query_embedding.astype('float32'), top_k
+            # Search variables database
+            results = self.variables_collection.query(
+                query_embeddings=query_embedding.tolist(),
+                n_results=top_k,
+                include=['documents', 'metadatas', 'distances']
             )
             
-            # Format results using metadata
+            # Format results for variables
             formatted_results = []
-            for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
-                if idx >= 0 and idx < len(self.variables_metadata):  # Valid result
-                    metadata = self.variables_metadata[idx]
-                    result = {
-                        'content': f"Variable {metadata.get('variable_id', 'Unknown')}: {metadata.get('label', 'No description')}",
-                        'metadata': metadata,
-                        'distance': float(distance),
-                        'score': max(0.0, 1.0 - (float(distance) / 2.0)),  # Convert to similarity
-                        'source': 'variables_faiss',
-                        'type': 'variable',
-                        'variable_id': metadata.get('variable_id', ''),
-                        'label': metadata.get('label', ''),
-                        'concept': metadata.get('concept', '')
-                    }
-                    formatted_results.append(result)
+            for i in range(len(results['documents'][0])):
+                result = {
+                    'content': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': results['distances'][0][i],
+                    'score': 1 - results['distances'][0][i],  # Convert distance to similarity
+                    'source': 'variables_db',
+                    'type': 'variable',
+                    'variable_id': results['metadatas'][0][i].get('temporal_id', ''),
+                    'label': results['metadatas'][0][i].get('label', ''),
+                    'concept': results['metadatas'][0][i].get('concept', '')
+                }
+                formatted_results.append(result)
             
-            # Filter by reasonable distance threshold for variables
+            # Filter by reasonable distance threshold for variables (more lenient)
             filtered_results = [r for r in formatted_results if r['distance'] < 1.5]
             
-            logger.info(f"Variables search: {len(filtered_results)} relevant results from FAISS")
+            logger.info(f"Variables search: {len(filtered_results)} relevant results from {len(results['documents'][0])} total")
             return filtered_results
             
         except Exception as e:
@@ -557,20 +512,19 @@ class DualPathKnowledgeBase:
         stats = {
             'embedding_model': self.model_name if self.embedding_model else 'Not available',
             'embedding_dimensions': self.embedding_dimension if self.embedding_model else 0,
-            'variables_db_available': self.variables_index is not None,
+            'variables_db_available': self.variables_collection is not None,
             'methodology_db_available': self.methodology_collection is not None,
             'variables_db_path': str(self.variables_db_path),
             'methodology_db_path': str(self.methodology_db_path),
-            'variables_db_type': 'FAISS',
-            'methodology_db_type': 'ChromaDB',
             'variable_contexts': len(self.variable_contexts),
             'location_patterns': len(self.location_patterns['major_cities'])
         }
         
-        if self.variables_metadata:
-            stats['variables_count'] = len(self.variables_metadata)
-        else:
-            stats['variables_count'] = 'Not available'
+        if self.variables_collection:
+            try:
+                stats['variables_count'] = self.variables_collection.count()
+            except:
+                stats['variables_count'] = 'Unknown'
         
         if self.methodology_collection:
             try:
