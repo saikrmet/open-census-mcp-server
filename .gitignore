@@ -11,6 +11,12 @@ knowledge-base/vector-db/*
 data/vector_db/*
 !data/vector_db/.gitkeep
 
+knowledge-base/variables-db/*
+knowledge-base/variables-faiss/*
+knowledge-base/methodology-db/*
+knowledge-base/catalog_cache/*
+knowledge-base/model_cache_v2.0/*
+
 # Keep build artifacts out
 knowledge-base/*.log
 knowledge-base/build_manifest.json
