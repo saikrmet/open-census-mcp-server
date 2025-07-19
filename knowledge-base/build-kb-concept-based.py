@@ -678,6 +678,7 @@ class ConceptBasedKnowledgeBuilder:
         
         return text, metadata
     
+
     def _build_variables_faiss(self, canonical_path: Path):
         """Build concept-based variables database using FAISS index"""
         logger.info("🎯 Processing canonical variables for FAISS database...")
@@ -694,6 +695,7 @@ class ConceptBasedKnowledgeBuilder:
         all_texts = []
         all_metadata = []
         all_embeddings = []
+        all_variable_ids = []  # 🔧 FIX: Track variable IDs for mapping
         
         batch_size = 1000
         total_batches = (len(concept_items) + batch_size - 1) // batch_size
@@ -704,6 +706,7 @@ class ConceptBasedKnowledgeBuilder:
             
             batch_texts = []
             batch_metadata = []
+            batch_variable_ids = []  # 🔧 FIX: Track IDs for this batch
             
             for variable_id, concept_data in batch:
                 # Create optimized embedding text and metadata
@@ -711,6 +714,7 @@ class ConceptBasedKnowledgeBuilder:
                 
                 batch_texts.append(text)
                 batch_metadata.append(metadata)
+                batch_variable_ids.append(variable_id)  # 🔧 FIX: Store variable ID
             
             # Generate embeddings for batch
             logger.info(f"🧠 Generating embeddings for {len(batch_texts)} variables...")
@@ -719,6 +723,7 @@ class ConceptBasedKnowledgeBuilder:
             all_texts.extend(batch_texts)
             all_metadata.extend(batch_metadata)
             all_embeddings.extend(embeddings)
+            all_variable_ids.extend(batch_variable_ids)  # 🔧 FIX: Add to main list
             
             self.variables_stats['concepts_processed'] += len(batch_texts)
         
@@ -746,6 +751,21 @@ class ConceptBasedKnowledgeBuilder:
             json.dump(all_metadata, f, indent=2)
         logger.info(f"💾 Metadata saved: {metadata_path}")
         
+        # 🔧 FIX: Save variable ID mapping (THE MISSING PIECE!)
+        ids_mapping = {
+            'variable_ids': all_variable_ids,
+            'total_variables': len(all_variable_ids),
+            'embedding_dimension': dimension,
+            'created_timestamp': time.time(),
+            'source_file': canonical_path.name,
+            'structure_type': 'concept_based' if is_refactored else 'temporal_based'
+        }
+        
+        ids_path = self.variables_dir / "variables_ids.json"
+        with open(ids_path, 'w') as f:
+            json.dump(ids_mapping, f, indent=2)
+        logger.info(f"💾 Variable IDs mapping saved: {ids_path}")
+        
         # Save build info
         build_info = {
             'model_name': self.model_name,
@@ -755,7 +775,8 @@ class ConceptBasedKnowledgeBuilder:
             'source_file': canonical_path.name,
             'build_timestamp': time.time(),
             'index_type': 'faiss_flat_l2',
-            'survey_instances_processed': self.variables_stats['survey_instances_processed']
+            'survey_instances_processed': self.variables_stats['survey_instances_processed'],
+            'has_id_mapping': True  # 🔧 FIX: Mark that ID mapping exists
         }
         
         build_info_path = self.variables_dir / "build_info.json"
@@ -765,6 +786,7 @@ class ConceptBasedKnowledgeBuilder:
         
         structure_note = "concept-based variables" if is_refactored else "temporal variables"
         logger.info(f"✅ FAISS variables database complete: {len(all_embeddings)} {structure_note}")
+        logger.info(f"✅ ID mapping created: {len(all_variable_ids)} variable IDs")
     
     def _build_variables_chromadb(self, canonical_path: Path):
         """Build concept-based variables database using ChromaDB"""

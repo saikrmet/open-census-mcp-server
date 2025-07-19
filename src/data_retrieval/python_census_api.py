@@ -59,13 +59,16 @@ class PythonCensusAPI:
                 return None
                 
             sys.path.insert(0, str(kb_path))
-            from kb_search import search, search_with_synonyms
+            from kb_search import ConceptBasedCensusSearchEngine
+            
+            # Initialize the search engine
+            search_engine = ConceptBasedCensusSearchEngine(
+                catalog_dir=str(project_root / "knowledge-base" / "table-catalog"),
+                variables_dir=str(project_root / "knowledge-base" / "variables-db")
+            )
             
             logger.info(f"✅ Semantic search loaded from {kb_path}")
-            return {
-                'search': search,
-                'search_with_synonyms': search_with_synonyms
-            }
+            return search_engine
             
         except ImportError as e:
             logger.error(f"Failed to import kb_search: {e}")
@@ -166,27 +169,26 @@ class PythonCensusAPI:
             return None
             
         try:
-            # Use semantic search with synonyms (65K variables)
-            search_func = self.semantic_search['search_with_synonyms']
-            results = search_func(query, k=5)
+            # Use the ConceptBasedCensusSearchEngine instance
+            results = self.semantic_search.search(query, max_results=5)
             
             if results and len(results) > 0:
                 best_result = results[0]
                 
                 # LOWER confidence threshold - semantic search is primary, not fallback
-                confidence = best_result.get('score', best_result.get('re_rank', 0))
+                confidence = best_result.confidence
                 
                 if confidence >= 0.4:  # Lower threshold - semantic search is primary system
                     return {
-                        'variable_id': best_result['variable_id'],
+                        'variable_id': best_result.variable_id,
                         'metadata': {
-                            'variables': [best_result['variable_id']],
+                            'variables': [best_result.variable_id],
                             'calculation': 'direct',
                             'source': 'semantic_search_primary',
                             'confidence': float(confidence),
-                            'label': best_result.get('label', ''),
-                            'table_id': best_result.get('table_id', ''),
-                            'domain_weights': best_result.get('weights', {})
+                            'label': best_result.label,
+                            'table_id': getattr(best_result, 'table_id', ''),
+                            'domain_weights': {}
                         }
                     }
                 else:
@@ -201,6 +203,15 @@ class PythonCensusAPI:
         """
         Parse location using centralized mappings and knowledge base intelligence
         """
+        # Handle national level queries first
+        location_lower = location.lower().strip()
+        if location_lower in ['united states', 'usa', 'us', 'nation', 'national']:
+            return {
+                'geography': 'us',
+                'display_name': 'United States',
+                'source': 'national_level'
+            }
+        
         # Use knowledge base for location parsing if available
         if self.knowledge_base:
             try:
@@ -322,6 +333,8 @@ class PythonCensusAPI:
         
         if location_info['geography'] == 'state':
             params['for'] = f"state:{location_info['state']}"
+        elif location_info['geography'] == 'us':
+            params['for'] = "us:*"
         elif location_info['geography'] == 'place':
             # Use place FIPS if available from centralized mappings
             if 'place_fips' in location_info:

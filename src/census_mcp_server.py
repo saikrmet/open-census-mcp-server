@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Census MCP Server - Containerized Census expertise via MCP protocol
+Census MCP Server - Updated for Concept-Based Search Architecture
 
-Provides natural language access to US Census data through:
-- Dual-path vector DB for variables and methodology
-- Python Census API integration for data retrieval
-- Statistical expert analysis prompts for intelligent responses
-- Geographic validation and statistical context
+Key updates for v2.4:
+- Uses ConceptBasedCensusSearchEngine instead of legacy search
+- Updated file paths for concept-based structure
+- Enhanced table catalog with keywords
+- Proper error handling for missing files
 """
 
 import asyncio
@@ -20,12 +20,24 @@ from typing import Any, Dict, List, Optional
 # MCP imports
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp import types
+from mcp.types import (
+    Tool,
+    TextContent,
+    ImageContent,
+    EmbeddedResource,
+)
 
-# Local imports
-from knowledge.vector_db import DualPathKnowledgeBase
-from data_retrieval.python_census_api import PythonCensusAPI
-from utils.config import Config
+# Updated imports for concept-based architecture
+try:
+    project_root = Path(__file__).parent.parent
+    sys.path.append(str(project_root))
+    sys.path.append(str(project_root / "knowledge-base"))
+    
+    from kb_search import ConceptBasedCensusSearchEngine  # Updated search engine
+    from src.data_retrieval.python_census_api import PythonCensusAPI
+except ImportError as e:
+    logging.error(f"Import error: {e}")
+    sys.exit(1)
 
 # Configure logging
 logging.basicConfig(
@@ -36,76 +48,137 @@ logger = logging.getLogger(__name__)
 
 class CensusMCPServer:
     """
-    Main MCP server class that orchestrates Census data requests.
+    Census MCP server with concept-based search architecture.
     
-    Handles:
-    - MCP protocol communication with prompts for statistical expertise
-    - Query parsing and context enrichment via dual-path vector DB
-    - Python Census API coordination for data retrieval
-    - Response formatting and statistical validation
+    Key improvements:
+    - Uses ConceptBasedCensusSearchEngine (no duplicates)
+    - Enhanced table catalog with keywords
+    - Survey instance awareness
+    - Proper geographic context parsing
     """
     
     def __init__(self):
-        """Initialize server components."""
-        self.config = Config()
+        """Initialize server with concept-based components."""
+        logger.info("🚀 Initializing Census MCP Server v2.4 (Concept-Based)")
         
-        # Initialize dual-path knowledge base
-        logger.info("Initializing dual-path knowledge base...")
-        self.knowledge_base = DualPathKnowledgeBase(
-            variables_db_path=self.config.variables_db_path,
-            methodology_db_path=self.config.methodology_db_path
-        )
+        # Initialize concept-based search engine
+        try:
+            logger.info("Loading concept-based search engine...")
+            
+            # Get absolute paths relative to script location
+            script_dir = Path(__file__).parent  # src/
+            project_root = script_dir.parent    # project root
+            
+            catalog_path = project_root / "knowledge-base" / "table-catalog"
+            variables_path = project_root / "knowledge-base" / "variables-db"
+            
+            self.search_engine = ConceptBasedCensusSearchEngine(
+                catalog_dir=str(catalog_path),
+                variables_dir=str(variables_path)
+            )
+            logger.info("✅ Concept-based search engine loaded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to load search engine: {e}")
+            raise
         
-        # Initialize Python Census API client
-        logger.info("Initializing Python Census API client...")
-        self.census_api = PythonCensusAPI(knowledge_base=self.knowledge_base)
+        # Initialize Python Census API
+        try:
+            logger.info("Loading Python Census API...")
+            self.census_api = PythonCensusAPI()
+            logger.info("✅ Python Census API loaded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to load Census API: {e}")
+            raise
         
         # Create MCP server instance
-        self.server = Server("census-mcp")
+        self.server = Server("census-mcp-v2.4")
         
-        # Register tools and prompts
+        # Register tools
         self._register_tools()
-        self._register_prompts()
         
-        logger.info("Census MCP Server initialized successfully")
+        logger.info("✅ Census MCP Server v2.4 initialized successfully")
+        logger.info("🎯 Features: Concept-based search, keyword enhancement, survey intelligence")
     
     def _register_tools(self):
-        """Register MCP tools that will be available to Claude Desktop."""
+        """Register MCP tools with enhanced concept-based capabilities."""
         
         @self.server.list_tools()
-        async def handle_list_tools() -> List[types.Tool]:
+        async def handle_list_tools() -> List[Tool]:
             """Return list of available Census tools."""
             return [
-                types.Tool(
+                Tool(
                     name="get_demographic_data",
-                    description="Get ACS demographic data for a location with statistical context",
+                    description="Get Census demographic data for locations using intelligent variable resolution",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "location": {
                                 "type": "string",
-                                "description": "Location (e.g., 'Austin, Texas', 'Maryland', 'Baltimore County, MD')"
+                                "description": "Location (e.g., 'Detroit, MI', 'California', 'Harris County, TX')"
                             },
                             "variables": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Demographic variables (e.g., ['median income', 'population', 'poverty rate'])"
-                            },
-                            "year": {
-                                "type": "integer",
-                                "description": "ACS year (default: 2023)",
-                                "default": 2023
+                                "description": "Natural language variable descriptions (e.g., 'median household income', 'poverty rate')"
                             },
                             "survey": {
                                 "type": "string",
-                                "description": "Survey type: 'acs1' or 'acs5' (default: 'acs5')",
+                                "description": "ACS survey: 'acs5' (5-year, default) or 'acs1' (1-year)",
                                 "default": "acs5"
+                            },
+                            "year": {
+                                "type": "integer",
+                                "description": "Data year (default: 2023)",
+                                "default": 2023
                             }
                         },
                         "required": ["location", "variables"]
                     }
                 ),
-                types.Tool(
+                Tool(
+                    name="search_census_variables",
+                    description="Search for Census variables using natural language with concept-based intelligence",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Natural language description of data needed"
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return",
+                                "default": 10
+                            },
+                            "geographic_context": {
+                                "type": "string",
+                                "description": "Geographic context if relevant (e.g., 'county level', 'state level')",
+                                "default": ""
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                ),
+                Tool(
+                    name="find_census_tables",
+                    description="Find Census tables using keywords and natural language",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Natural language description of table topic"
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of tables to return",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                ),
+                Tool(
                     name="compare_locations",
                     description="Compare demographic data across multiple locations",
                     inputSchema={
@@ -121,411 +194,396 @@ class CensusMCPServer:
                                 "items": {"type": "string"},
                                 "description": "Variables to compare across locations"
                             },
-                            "year": {"type": "integer", "default": 2023},
-                            "survey": {"type": "string", "default": "acs5"}
-                        },
-                        "required": ["locations", "variables"]
-                    }
-                ),
-                types.Tool(
-                    name="search_census_knowledge",
-                    description="Search Census methodology and documentation",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "query": {
+                            "survey": {
                                 "type": "string",
-                                "description": "Search query for Census methodology/documentation"
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "Additional context about what you're looking for",
-                                "default": ""
+                                "description": "ACS survey type",
+                                "default": "acs5"
                             }
                         },
-                        "required": ["query"]
+                        "required": ["locations", "variables"]
                     }
                 )
             ]
         
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> List[types.TextContent]:
-            """Handle tool calls from Claude."""
+        async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+            """Handle tool execution with enhanced error handling."""
             try:
                 if name == "get_demographic_data":
-                    result = await self._get_demographic_data(**arguments)
-                    return [types.TextContent(type="text", text=result)]
-                
+                    return await self._get_demographic_data(arguments)
+                elif name == "search_census_variables":
+                    return await self._search_census_variables(arguments)
+                elif name == "find_census_tables":
+                    return await self._find_census_tables(arguments)
                 elif name == "compare_locations":
-                    result = await self._compare_locations(**arguments)
-                    return [types.TextContent(type="text", text=result)]
-                
-                elif name == "search_census_knowledge":
-                    result = await self._search_census_knowledge(**arguments)
-                    return [types.TextContent(type="text", text=result)]
-                
+                    return await self._compare_locations(arguments)
                 else:
-                    return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-                    
+                    return [TextContent(
+                        type="text",
+                        text=f"❌ Unknown tool: {name}"
+                    )]
             except Exception as e:
-                logger.error(f"Tool {name} error: {str(e)}")
-                return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+                logger.error(f"❌ Error executing tool {name}: {str(e)}")
+                return [TextContent(
+                    type="text",
+                    text=f"❌ Error executing {name}: {str(e)}\n\nThis may be due to missing data files or API issues. Please try again or contact support."
+                )]
     
-    def _register_prompts(self):
-        """Register MCP prompts for statistical expert analysis."""
+    async def _search_census_variables(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        """Search for Census variables using concept-based intelligence."""
+        query = arguments.get("query", "")
+        max_results = arguments.get("max_results", 10)
+        geographic_context = arguments.get("geographic_context", "")
         
-        @self.server.list_prompts()
-        async def handle_list_prompts() -> List[types.Prompt]:
-            """List available prompts"""
-            return [
-                types.Prompt(
-                    name="statistical_expert_analysis",
-                    description="Analyze Census/ACS data with statistical expertise and plain language explanation",
-                    arguments=[
-                        types.PromptArgument(
-                            name="data_result",
-                            description="Raw Census data result from API call",
-                            required=True,
-                        ),
-                        types.PromptArgument(
-                            name="user_query",
-                            description="Original user question",
-                            required=True,
-                        ),
-                        types.PromptArgument(
-                            name="methodology_notes",
-                            description="Any methodological concerns or data limitations",
-                            required=False,
-                        ),
-                    ],
-                ),
-                types.Prompt(
-                    name="census_consultation",
-                    description="Act as a Census Bureau statistical consultant for any data question",
-                    arguments=[
-                        types.PromptArgument(
-                            name="user_question",
-                            description="User's question about Census data or methodology",
-                            required=True,
-                        ),
-                        types.PromptArgument(
-                            name="available_data",
-                            description="Any available data or context",
-                            required=False,
-                        ),
-                    ],
-                ),
-            ]
-
-        @self.server.get_prompt()
-        async def handle_get_prompt(
-            name: str, arguments: dict[str, str] | None
-        ) -> types.GetPromptResult:
-            """Get prompt content"""
-            
-            if name == "statistical_expert_analysis":
-                if not arguments:
-                    raise ValueError("Arguments required for statistical_expert_analysis")
-                
-                data_result = arguments.get("data_result", "")
-                user_query = arguments.get("user_query", "")
-                methodology_notes = arguments.get("methodology_notes", "")
-                
-                prompt_content = f"""
-You are a senior Census Bureau statistician and ACS (American Community Survey) data expert. Your role is to serve as a trusted statistical consultant, not just a data retriever.
-
-ANALYSIS TASK:
-User asked: "{user_query}"
-Raw data result: {data_result}
-{f"Methodological notes: {methodology_notes}" if methodology_notes else ""}
-
-PROVIDE A RESPONSE THAT:
-
-1. **Explains the data clearly**: Translate the numbers into plain language that non-statisticians understand
-2. **Provides context**: What do these numbers actually mean in practical terms?
-3. **Includes reliability assessment**: Explain margins of error and what they represent
-4. **Flags limitations**: Point out any methodological concerns, biases, or fitness-for-use issues
-5. **Suggests follow-ups**: Ask clarifying questions or suggest related data that might be useful
-6. **Routes appropriately**: If Census data isn't the best source, recommend better alternatives
-
-RESPONSE STYLE:
-- Conversational and helpful, not academic or technical
-- Start with the answer, then provide context
-- Use phrases like "This means approximately..." and "You should be aware that..."
-- Proactively explain why this data should or shouldn't be trusted
-- End with a question or suggestion for further analysis
-
-STATISTICAL WARNINGS TO CONSIDER:
-- Large margins of error relative to estimates
-- Small sample sizes affecting reliability  
-- Mixed categories that might not match user intent
-- Temporal factors affecting comparability
-- Geographic aggregation issues
-- When other agencies (BLS, BEA) might be better sources
-
-Remember: Make Census data accessible, trustworthy, and actionable for non-experts.
-"""
-                
-                return types.GetPromptResult(
-                    description="Statistical expert analysis of Census/ACS data",
-                    messages=[
-                        types.PromptMessage(
-                            role="user",
-                            content=types.TextContent(
-                                type="text",
-                                text=prompt_content
-                            ),
-                        ),
-                    ],
-                )
-            
-            elif name == "census_consultation":
-                if not arguments:
-                    raise ValueError("Arguments required for census_consultation")
-                
-                user_question = arguments.get("user_question", "")
-                available_data = arguments.get("available_data", "")
-                
-                prompt_content = f"""
-You are a senior Census Bureau statistician and data expert providing consultation services. A user has come to you with a question about Census data.
-
-USER QUESTION: "{user_question}"
-{f"AVAILABLE DATA/CONTEXT: {available_data}" if available_data else ""}
-
-As a statistical expert, provide guidance that includes:
-
-1. **Direct answer** to their question if possible
-2. **Data source recommendations** - which Census surveys/tables are most appropriate
-3. **Methodological guidance** - what they should know about data quality, limitations, sampling
-4. **Alternative sources** - when BLS, BEA, or other agencies might be better
-5. **Follow-up questions** - what additional information would help you provide better guidance
-
-Be conversational, helpful, and educational. Your goal is to help them get the right data in the right way for their specific needs.
-
-Always include:
-- Plain language explanations
-- Warnings about data limitations when relevant
-- Suggestions for next steps
-- Questions to better understand their needs
-
-Act as a trusted advisor who wants to ensure they use data appropriately and understand its limitations.
-"""
-                
-                return types.GetPromptResult(
-                    description="Census Bureau statistical consultation",
-                    messages=[
-                        types.PromptMessage(
-                            role="user",
-                            content=types.TextContent(
-                                type="text",
-                                text=prompt_content
-                            ),
-                        ),
-                    ],
-                )
-            
-            else:
-                raise ValueError(f"Unknown prompt: {name}")
-    
-    async def _get_demographic_data(self, location: str, variables: List[str],
-                                  year: int = 2023, survey: str = "acs5") -> str:
-        """Get demographic data for a location with enhanced response."""
+        if not query:
+            return [TextContent(
+                type="text",
+                text="❌ Please provide a search query."
+            )]
+        
         try:
-            # Get data from Census API
-            result = await self.census_api.get_acs_data(location, variables, year, survey)
+            logger.info(f"🔍 Searching variables: '{query}'")
             
-            if "error" in result:
-                error_response = f"# 🏛️ Official Census Data for {location}\n\n"
-                error_response += f"❌ **Error retrieving official data**: {result['error']}\n\n"
-                error_response += "**Note**: This location or variable may not be available in the Census data. "
-                error_response += "Common issues:\n"
-                error_response += "• Location name spelling (try 'Baltimore, MD' instead of 'Baltimore')\n"
-                error_response += "• Variable not collected at this geographic level\n"
-                error_response += "• Data suppressed for privacy (small populations)\n\n"
-                error_response += "For questions about data availability, consult the Census Bureau's official documentation."
-                error_response += "\n\n**💡 Suggestion**: Use the 'statistical_expert_analysis' or 'census_consultation' prompt for expert guidance on this issue."
-                return error_response
-            
-            # Format successful response with suggestion to use expert analysis
-            formatted_response = self._format_demographic_response(result, variables)
-            formatted_response += "\n\n**💡 Expert Analysis Available**: Use the 'statistical_expert_analysis' prompt with this data for detailed statistical interpretation and guidance."
-            
-            return formatted_response
-            
-        except Exception as e:
-            logger.error(f"Error in get_demographic_data: {str(e)}")
-            return f"Error retrieving demographic data: {str(e)}"
-    
-    async def _compare_locations(self, locations: List[str], variables: List[str],
-                               year: int = 2023, survey: str = "acs5") -> str:
-        """Compare demographic data across multiple locations."""
-        try:
-            comparison_data = []
-            
-            for location in locations:
-                result = await self.census_api.get_acs_data(location, variables, year, survey)
-                comparison_data.append({
-                    "location": location,
-                    "data": result.get("data", {}),
-                    "error": result.get("error")
-                })
-            
-            formatted_response = self._format_comparison_response(comparison_data, variables)
-            formatted_response += "\n\n**💡 Expert Analysis Available**: Use the 'statistical_expert_analysis' prompt for detailed interpretation of these comparisons."
-            
-            return formatted_response
-            
-        except Exception as e:
-            logger.error(f"Error in compare_locations: {str(e)}")
-            return f"Error comparing locations: {str(e)}"
-    
-    async def _search_census_knowledge(self, query: str, context: str = "") -> str:
-        """Search Census methodology and documentation."""
-        try:
-            # Use methodology database for conceptual queries
-            results = self.knowledge_base.search_methodology(query, k=5)
+            # Use concept-based search
+            results = self.search_engine.search(query, max_results=max_results)
             
             if not results:
-                no_results_response = f"# 🏛️ Official Census Knowledge: {query}\n\n"
-                no_results_response += "No specific documentation found in the knowledge base for this query.\n\n"
-                no_results_response += "**Alternative Resources**:\n"
-                no_results_response += "• Census Bureau's official website: https://www.census.gov\n"
-                no_results_response += "• ACS Documentation: https://www.census.gov/programs-surveys/acs/\n"
-                no_results_response += "• Variable definitions: https://api.census.gov/data/2023/acs/acs5/variables.html\n\n"
-                no_results_response += "**Note**: The knowledge base contains Census methodology and documentation. "
-                no_results_response += "For the most current information, always consult the Census Bureau's official sources."
-                no_results_response += "\n\n**💡 Expert Consultation**: Use the 'census_consultation' prompt for personalized guidance on this topic."
-                return no_results_response
+                return [TextContent(
+                    type="text",
+                    text=f"❌ No variables found for query: '{query}'\n\nTry using different keywords or broader terms."
+                )]
             
-            formatted_response = self._format_knowledge_response(query, results)
-            formatted_response += "\n\n**💡 Expert Consultation**: Use the 'census_consultation' prompt for personalized guidance on this methodology topic."
+            # Format results with enhanced metadata
+            response_parts = [
+                f"🎯 Found {len(results)} variables for: '{query}'\n"
+            ]
             
-            return formatted_response
+            for i, result in enumerate(results, 1):
+                response_parts.append(f"\n**{i}. {result.variable_id}**")
+                response_parts.append(f"   📊 **Label**: {result.label}")
+                response_parts.append(f"   🎯 **Concept**: {result.concept}")
+                response_parts.append(f"   📈 **Confidence**: {result.confidence:.3f}")
+                
+                # Show survey availability
+                if hasattr(result, 'available_surveys') and result.available_surveys:
+                    surveys = ', '.join(result.available_surveys)
+                    response_parts.append(f"   📅 **Available in**: {surveys}")
+                
+                # Show geographic levels if available
+                if hasattr(result, 'geography_levels') and result.geography_levels:
+                    geo_levels = ', '.join(result.geography_levels[:3])
+                    response_parts.append(f"   🗺️  **Geography**: {geo_levels}")
+                
+                # Show table family
+                table_id = result.variable_id.split('_')[0] if '_' in result.variable_id else 'Unknown'
+                response_parts.append(f"   📋 **Table**: {table_id}")
+            
+            response_parts.append(f"\n💡 **Tip**: Use 'get_demographic_data' to retrieve actual values for these variables.")
+            
+            return [TextContent(
+                type="text",
+                text="\n".join(response_parts)
+            )]
             
         except Exception as e:
-            logger.error(f"Error in search_census_knowledge: {str(e)}")
-            return f"Error searching knowledge base: {str(e)}"
+            logger.error(f"Variable search error: {e}")
+            return [TextContent(
+                type="text",
+                text=f"❌ Search error: {str(e)}"
+            )]
     
-    def _format_demographic_response(self, result: Dict, variables: List[str]) -> str:
-        """Format demographic data response with statistical context."""
-        response_parts = [f"# 🏛️ Official Census Data for {result.get('location', 'Unknown Location')}\n"]
+    async def _find_census_tables(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        """Find Census tables using keyword-enhanced search."""
+        query = arguments.get("query", "")
+        max_results = arguments.get("max_results", 5)
         
-        data = result.get("data", {})
+        if not query:
+            return [TextContent(
+                type="text",
+                text="❌ Please provide a search query."
+            )]
         
-        for var in variables:
-            if var in data and "error" not in data[var]:
-                var_data = data[var]
-                estimate = var_data.get("estimate", "N/A")
-                moe = var_data.get("moe", "N/A")
-                
-                response_parts.extend([
-                    f"## {var.title()}",
-                    f"**Official Value**: {estimate}",
-                    f"**Margin of Error**: ±{moe}",
-                    f"**Definition**: Census variable: {var}",
-                    ""
-                ])
-            else:
-                response_parts.extend([
-                    f"## {var.title()}",
-                    "**Status**: Data not available or error in retrieval",
-                    ""
-                ])
-        
-        # Add methodological context
-        response_parts.extend([
-            "---",
-            "## 🏛️ **Official Data Source & Methodology**",
-            "**Source**: US Census Bureau American Community Survey",
-            f"**Survey**: ACS 5-Year Estimates",
-            f"**Year**: {result.get('year', 2023)}",
-            f"**Geography**: {result.get('geography_level', 'Unknown')} level",
-            "",
-            "**Statistical Notes**:",
-            "• All estimates include margins of error at 90% confidence level",
-            "• ACS 5-year estimates are more reliable but less current than 1-year estimates",
-            "• Small differences may not be statistically significant",
-            "• Data collected through scientific sampling methods with quality controls",
-            "",
-            "**Authority**: This data comes directly from the US Census Bureau's official American Community Survey, the gold standard for US demographic statistics."
-        ])
-        
-        return "\n".join(response_parts)
-    
-    def _format_comparison_response(self, comparison_data: List[Dict], variables: List[str]) -> str:
-        """Format location comparison response."""
-        response_parts = ["# 📊 Location Comparison\n"]
-        
-        # Create comparison table for each variable
-        for var in variables:
-            response_parts.append(f"## {var.title()}")
-            response_parts.append("| Location | Value | Margin of Error |")
-            response_parts.append("|----------|-------|-----------------|")
+        try:
+            logger.info(f"🔍 Searching tables: '{query}'")
             
-            for loc_data in comparison_data:
-                location = loc_data["location"]
-                data = loc_data["data"]
+            # Search for tables (get mixed results and filter for tables)
+            all_results = self.search_engine.search(query, max_results=max_results * 2)
+            table_results = [r for r in all_results if hasattr(r, 'table_id')][:max_results]
+            
+            if not table_results:
+                return [TextContent(
+                    type="text",
+                    text=f"❌ No tables found for query: '{query}'\n\nTry using different keywords."
+                )]
+            
+            # Format table results with keywords
+            response_parts = [
+                f"📋 Found {len(table_results)} tables for: '{query}'\n"
+            ]
+            
+            for i, result in enumerate(table_results, 1):
+                response_parts.append(f"\n**{i}. Table {result.table_id}**")
                 
-                if var in data and "error" not in data:
-                    estimate = data[var].get("estimate", "N/A")
-                    moe = data[var].get("moe", "N/A")
-                    response_parts.append(f"| {location} | {estimate} | ±{moe} |")
+                # Get table info for keywords
+                table_info = self.search_engine.get_table_info(result.table_id)
+                
+                if table_info:
+                    response_parts.append(f"   📊 **Title**: {table_info.get('title', 'Unknown')}")
+                    response_parts.append(f"   👥 **Universe**: {table_info.get('universe', 'Unknown')}")
+                    
+                    # Show keywords if available
+                    keywords = table_info.get('search_keywords', {})
+                    if keywords.get('primary_keywords'):
+                        kw_text = ', '.join(keywords['primary_keywords'][:3])
+                        response_parts.append(f"   🔑 **Keywords**: {kw_text}")
+                    
+                    if keywords.get('summary'):
+                        summary = keywords['summary'][:150] + "..." if len(keywords['summary']) > 150 else keywords['summary']
+                        response_parts.append(f"   📝 **Summary**: {summary}")
+                    
+                    # Show survey availability
+                    surveys = table_info.get('survey_programs', [])
+                    if surveys:
+                        response_parts.append(f"   📅 **Surveys**: {', '.join(surveys)}")
+                
+                response_parts.append(f"   📈 **Confidence**: {result.confidence:.3f}")
+            
+            response_parts.append(f"\n💡 **Tip**: Use table IDs with 'search_census_variables' to find specific variables.")
+            
+            return [TextContent(
+                type="text",
+                text="\n".join(response_parts)
+            )]
+            
+        except Exception as e:
+            logger.error(f"Table search error: {e}")
+            return [TextContent(
+                type="text",
+                text=f"❌ Table search error: {str(e)}"
+            )]
+    
+    async def _get_demographic_data(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        """Get demographic data using intelligent variable resolution."""
+        location = arguments.get("location", "")
+        variables = arguments.get("variables", [])
+        survey = arguments.get("survey", "acs5")
+        year = arguments.get("year", 2023)
+        
+        if not location or not variables:
+            return [TextContent(
+                type="text",
+                text="❌ Please provide both location and variables."
+            )]
+        
+        try:
+            logger.info(f"📊 Getting data for {location}: {variables}")
+            
+            # Use the working Python Census API directly
+            result = await self.census_api.get_acs_data(
+                location=location,
+                variables=variables,
+                year=year,
+                survey=survey
+            )
+            
+            # Format comprehensive response
+            if result.get('error'):
+                error_response = f"# 🏛️ Official Census Data for {location}\n\n"
+                error_response += f"❌ **Error**: {result['error']}\n\n"
+                error_response += "**Common Issues:**\n"
+                error_response += "• Location spelling (try 'Baltimore, MD' instead of 'Baltimore')\n"
+                error_response += "• Variable not available at this geographic level\n"
+                error_response += "• Data suppressed for privacy (small sample sizes)\n\n"
+                error_response += "**💡 Tip**: Use 'search_census_variables' to find available variables."
+                return [TextContent(type="text", text=error_response)]
+            
+            # Format successful response
+            response_parts = [
+                f"# 🏛️ Official Census Data for {result.get('location', location)}\n",
+                f"📅 Survey: {survey.upper()} {year}",
+                f"🗺️  Geography: {result.get('geography_level', 'Unknown')} level\n"
+            ]
+            
+            response_parts.append("## 📈 **Data Results:**")
+            
+            data = result.get('data', {})
+            for var in variables:
+                if var in data:
+                    var_data = data[var]
+                    # Get the actual estimate value - handle both string and numeric formats
+                    estimate = var_data.get('estimate', 'N/A')
+                    moe = var_data.get('moe', 'N/A')
+                    raw_value = var_data.get('raw_value', None)
+                    
+                    response_parts.append(f"### {var.title()}")
+                    
+                    # Use raw_value if estimate is formatted as "0" but raw_value exists
+                    if estimate in ['0', '0.0', 0] and raw_value and raw_value > 0:
+                        # Format the raw value properly
+                        if raw_value >= 1000:
+                            display_value = f"${raw_value:,.0f}" if 'income' in var.lower() or 'earning' in var.lower() or 'salary' in var.lower() else f"{raw_value:,.0f}"
+                        else:
+                            display_value = str(raw_value)
+                        response_parts.append(f"**Value**: {display_value}")
+                    else:
+                        response_parts.append(f"**Value**: {estimate}")
+                    
+                    if moe != 'N/A' and moe not in ['±0', '0']:
+                        response_parts.append(f"**Margin of Error**: {moe}")
+                    
+                    # Show raw value for debugging if different from estimate
+                    if raw_value and str(raw_value) != str(estimate):
+                        response_parts.append(f"**Raw Value**: {raw_value}")
+                    
+                    response_parts.append("")
                 else:
-                    response_parts.append(f"| {location} | Error | - |")
+                    response_parts.append(f"### {var.title()}")
+                    response_parts.append("**Status**: Data not available")
+                    response_parts.append("")
             
-            response_parts.append("")  # Add spacing
-        
-        response_parts.extend([
-            "---",
-            "**Source**: US Census Bureau American Community Survey",
-            "**Note**: All estimates include margins of error. Statistical significance testing recommended for comparisons."
-        ])
-        
-        return "\n".join(response_parts)
-    
-    def _format_knowledge_response(self, query: str, results: List[Dict]) -> str:
-        """Format knowledge search results."""
-        response_parts = [f"# 🏛️ Official Census Knowledge: {query}\n"]
-        
-        if not results:
-            response_parts.append("No relevant documentation found for this query.")
-            return "\n".join(response_parts)
-        
-        for i, result in enumerate(results[:3], 1):  # Top 3 results
+            # Add resolution metadata if available
+            if 'semantic_intelligence' in result and result['semantic_intelligence']:
+                response_parts.append("## 🎯 **Variable Resolution:**")
+                for intel in result['semantic_intelligence']:
+                    var_name = intel.get('variable', '')
+                    census_var = intel.get('census_variable', [])
+                    confidence = intel.get('confidence', 0)
+                    method = intel.get('resolution_method', 'unknown')
+                    
+                    if census_var:
+                        response_parts.append(f"• **{var_name}** → {', '.join(census_var)} (confidence: {confidence:.2f}, method: {method})")
+                response_parts.append("")
+            
+            # Add methodological context
             response_parts.extend([
-                f"## Result {i}: {result.get('title', 'Census Documentation')}",
-                result.get('content', ''),
-                f"**Source**: {result.get('source', 'Census Bureau Documentation')}",
-                f"**Relevance**: {result.get('score', 0):.3f}",
-                ""
+                "---",
+                "## 🏛️ **Official Data Source**",
+                "**Source**: US Census Bureau American Community Survey",
+                "**Authority**: Official demographic statistics with scientific sampling",
+                "**Quality**: All estimates include margins of error at 90% confidence level",
+                "**Note**: Small differences may not be statistically significant"
             ])
+            
+            return [TextContent(
+                type="text",
+                text="\n".join(response_parts)
+            )]
+            
+        except Exception as e:
+            logger.error(f"Data retrieval error: {e}")
+            return [TextContent(
+                type="text",
+                text=f"❌ Data retrieval error: {str(e)}"
+            )]
+    
+    async def _compare_locations(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        """Compare data across multiple locations."""
+        locations = arguments.get("locations", [])
+        variables = arguments.get("variables", [])
+        survey = arguments.get("survey", "acs5")
         
-        response_parts.extend([
-            "---",
-            "**Note**: This information comes from Census Bureau methodology documentation and training materials."
-        ])
+        if len(locations) < 2:
+            return [TextContent(
+                type="text",
+                text="❌ Please provide at least 2 locations to compare."
+            )]
         
-        return "\n".join(response_parts)
+        if not variables:
+            return [TextContent(
+                type="text",
+                text="❌ Please provide variables to compare."
+            )]
+        
+        try:
+            logger.info(f"📊 Comparing {len(locations)} locations for {len(variables)} variables")
+            
+            # Get data for each location using the working Python API
+            comparison_data = {}
+            
+            for location in locations:
+                result = await self.census_api.get_acs_data(
+                    location=location,
+                    variables=variables,
+                    survey=survey
+                )
+                comparison_data[location] = result
+            
+            # Format comparison
+            response_parts = [
+                f"# 📊 **Location Comparison** ({survey.upper()})",
+                f"📍 Locations: {', '.join(locations)}",
+                f"📈 Variables: {', '.join(variables)}\n"
+            ]
+            
+            # Create comparison table for each variable
+            for var in variables:
+                response_parts.append(f"## {var.title()}")
+                response_parts.append("| Location | Value | Margin of Error | Status |")
+                response_parts.append("|----------|-------|-----------------|--------|")
+                
+                for location in locations:
+                    result = comparison_data.get(location, {})
+                    data = result.get('data', {})
+                    
+                    if result.get('error'):
+                        response_parts.append(f"| {location} | Error | - | {result['error'][:50]}... |")
+                    elif var in data:
+                        var_data = data[var]
+                        estimate = var_data.get('estimate', 'N/A')
+                        raw_value = var_data.get('raw_value', None)
+                        moe = var_data.get('moe', 'N/A')
+                        
+                        # Use raw_value if estimate shows as "0" but raw_value exists
+                        if estimate in ['0', '0.0', 0] and raw_value and raw_value > 0:
+                            if raw_value >= 1000:
+                                display_value = f"${raw_value:,.0f}" if 'income' in var.lower() or 'earning' in var.lower() or 'salary' in var.lower() else f"{raw_value:,.0f}"
+                            else:
+                                display_value = str(raw_value)
+                            response_parts.append(f"| {location} | {display_value} | {moe} | ✅ |")
+                        else:
+                            response_parts.append(f"| {location} | {estimate} | {moe} | ✅ |")
+                    else:
+                        response_parts.append(f"| {location} | N/A | - | No data |")
+                
+                response_parts.append("")  # Add spacing
+            
+            response_parts.extend([
+                "---",
+                "**Source**: US Census Bureau American Community Survey",
+                "**Note**: All estimates include margins of error. Statistical significance testing recommended for comparisons."
+            ])
+            
+            return [TextContent(
+                type="text",
+                text="\n".join(response_parts)
+            )]
+            
+        except Exception as e:
+            logger.error(f"Comparison error: {e}")
+            return [TextContent(
+                type="text",
+                text=f"❌ Comparison error: {str(e)}"
+            )]
 
 async def main():
-    """Main entry point for the MCP server."""
-    logger.info("Starting Census MCP Server with Statistical Expert Prompts...")
-    
+    """Main server entry point."""
     try:
-        # Create server instance
-        census_server = CensusMCPServer()
+        # Initialize server
+        server = CensusMCPServer()
         
-        # Run server with stdio transport (for Claude Desktop)
+        # Run stdio server
         async with stdio_server() as (read_stream, write_stream):
-            await census_server.server.run(
+            logger.info("🚀 Census MCP Server v2.4 running...")
+            await server.server.run(
                 read_stream,
                 write_stream,
-                census_server.server.create_initialization_options()
+                server.server.create_initialization_options()
             )
+    except KeyboardInterrupt:
+        logger.info("👋 Server shutdown by user")
     except Exception as e:
-        logger.error(f"Server error: {str(e)}")
+        logger.error(f"❌ Server error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
-    # Entry point for the MCP server
     asyncio.run(main())
