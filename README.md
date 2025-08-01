@@ -8,7 +8,7 @@ It is **not** affiliated with, endorsed by, or sponsored by the U.S. Census Bure
 Data retrieved through this project remains subject to the terms of the original data providers (e.g., Census API Terms of Service).
 
 ## Stability
-Pre-1.0 API – breaking changes may occur. Pin a commit or Docker tag for production use.
+Container build 2.0 is decent, but still issues with the quality of results.
 
 ## Census in Your Pocket 📱
 
@@ -66,6 +66,8 @@ U.S. Census data is incredibly valuable but has a steep learning curve for non-s
 ## Vision: Democratizing America's Data
 
 **Today:** Census data influences billions in government spending and policy decisions, but accessing it effectively requires specialized knowledge that creates barriers for many potential users.
+
+**Opportunity:** The semantic matching from natural language to Census variable codes is genuinely novel and could be transformative for researchers who currently have to navigate thousands of cryptic variable names manually. Everyone should have access to high-quality Census data with a world-class AI assistant. 
 
 **Tomorrow:** City council members fact-check claims in real-time during meetings. Journalists get demographic context while writing stories. Nonprofits understand their communities without hiring statisticians. Researchers spend time analyzing instead of wrestling with APIs.
 
