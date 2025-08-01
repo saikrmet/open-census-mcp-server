@@ -81,11 +81,12 @@ class GeographicHandler:
         
         Multi-strategy approach:
         1. Hot cache (instant)
-        2. Exact database match  
-        3. Fuzzy matching with name variations
-        4. Cross-type lookup (places → counties for independent cities)
-        5. Spatial reasoning (metro areas, adjacent counties)
-        6. Smart suggestions on failure
+        2. Direct state resolution (NEW - fixes the bug)
+        3. Exact database match  
+        4. Fuzzy matching with name variations
+        5. Cross-type lookup (places → counties for independent cities)
+        6. Spatial reasoning (metro areas, adjacent counties)
+        7. Smart suggestions on failure
         """
         location = location_string.strip()
         
@@ -98,6 +99,13 @@ class GeographicHandler:
                 'state_abbrev': None,
                 'resolution_method': 'national_keyword'
             }
+        
+        # NEW: Direct state resolution (fixes the main bug)
+        state_result = self._resolve_state_direct(location)
+        if state_result:
+            state_result['resolution_method'] = 'state_direct'
+            logger.debug(f"✅ Direct state match: {location} → {state_result}")
+            return state_result
         
         # Strategy 1: Hot cache check (fastest path)
         location_lower = location.lower()
@@ -150,7 +158,7 @@ class GeographicHandler:
         
         # Strategy 5: State-only fallback (graceful degradation)
         for variant in parsed_variants:
-            state_result = self._resolve_state_only(variant['state'])
+            state_result = self._resolve_state_direct(variant['state'])
             if state_result:
                 state_result['resolution_method'] = 'state_fallback'
                 state_result['warning'] = f"City '{variant['city']}' not found, using state-level data"
@@ -159,6 +167,47 @@ class GeographicHandler:
         
         # Strategy 6: Intelligent failure with suggestions
         return self._fail_with_suggestions(location, "No geographic match found")
+    
+    def _resolve_state_direct(self, location: str) -> Optional[Dict[str, Any]]:
+        """
+        FIXED: Query database for states instead of hardcoded dictionary
+        Handles both state abbreviations (MD) and full names (Maryland)
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # First check if states table exists and what columns it has
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='states'")
+            if not cursor.fetchone():
+                logger.debug("No states table found, checking for state data in other tables")
+                return None
+            
+            # Try both abbreviation and full name matching - FIXED column names
+            cursor.execute("""
+                SELECT state_fips, state_abbrev, state_name
+                FROM states 
+                WHERE state_abbrev = ? OR LOWER(state_name) = ?
+                LIMIT 1
+            """, (location.upper(), location.lower()))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'geography': 'state',
+                    'state_fips': row['state_fips'],
+                    'place_fips': None,
+                    'state_abbrev': row['state_abbrev'],
+                    'name': row['state_name']
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"State database lookup failed: {e}")
+            # Fallback to checking if this looks like a state abbreviation
+            if len(location) == 2 and location.upper().isalpha():
+                logger.warning(f"States table query failed, but {location} looks like state abbreviation")
+            return None
     
     def _generate_location_variants(self, location: str) -> List[Dict[str, str]]:
         """Generate intelligent variants of the location string"""
@@ -462,31 +511,6 @@ class GeographicHandler:
         except Exception as e:
             logger.error(f"Database lookup failed: {e}")
             return None
-    
-    def _resolve_state_only(self, state_abbrev: str) -> Optional[Dict[str, Any]]:
-        """Resolve to state-level geography"""
-        state_fips_map = {
-            'AL': '01', 'AK': '02', 'AZ': '04', 'AR': '05', 'CA': '06', 'CO': '08',
-            'CT': '09', 'DE': '10', 'FL': '12', 'GA': '13', 'HI': '15', 'ID': '16',
-            'IL': '17', 'IN': '18', 'IA': '19', 'KS': '20', 'KY': '21', 'LA': '22',
-            'ME': '23', 'MD': '24', 'MA': '25', 'MI': '26', 'MN': '27', 'MS': '28',
-            'MO': '29', 'MT': '30', 'NE': '31', 'NV': '32', 'NH': '33', 'NJ': '34',
-            'NM': '35', 'NY': '36', 'NC': '37', 'ND': '38', 'OH': '39', 'OK': '40',
-            'OR': '41', 'PA': '42', 'RI': '44', 'SC': '45', 'SD': '46', 'TN': '47',
-            'TX': '48', 'UT': '49', 'VT': '50', 'VA': '51', 'WA': '53', 'WV': '54',
-            'WI': '55', 'WY': '56', 'DC': '11', 'PR': '72'
-        }
-        
-        state_fips = state_fips_map.get(state_abbrev)
-        if state_fips:
-            return {
-                'geography': 'state',
-                'state_fips': state_fips,
-                'place_fips': None,
-                'state_abbrev': state_abbrev
-            }
-        
-        return None
     
     def get_suggestions(self, location: str, limit: int = 5) -> List[str]:
         """Get suggestions for failed location lookups"""

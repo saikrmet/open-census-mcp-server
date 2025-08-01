@@ -30,6 +30,27 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
+# OpenAI for embeddings (optional)
+try:
+    import openai
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    import os
+    # Look for .env in parent directory
+    env_path = Path(__file__).parent.parent / '.env'
+    load_dotenv(env_path)
+except ImportError:
+    import os
+
+# Silence tokenizers parallelism warning
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -132,9 +153,9 @@ class ConceptBasedTableCatalogSearch:
         logger.info("Loading concept-based table catalog...")
         
         # Load table catalog
-        catalog_file = self.catalog_dir / "table_catalog.json"
+        catalog_file = self.catalog_dir / "table_catalog_enhanced.json"
         if not catalog_file.exists():
-            raise FileNotFoundError(f"Table catalog not found: {catalog_file}")
+            raise FileNotFoundError(f"Enhanced table catalog not found: {catalog_file}")
         
         with open(catalog_file) as f:
             catalog_data = json.load(f)
@@ -152,64 +173,110 @@ class ConceptBasedTableCatalogSearch:
         logger.info(f"Loaded {len(self.tables)} tables (catalog version: {model_version})")
         
         # Load FAISS embeddings
-        faiss_file = self.catalog_dir / "table_embeddings.faiss"
+        faiss_file = self.catalog_dir / "table_embeddings_enhanced.faiss"
         if not faiss_file.exists():
-            raise FileNotFoundError(f"FAISS index not found: {faiss_file}")
+            raise FileNotFoundError(f"Enhanced FAISS index not found: {faiss_file}")
         
         self.embeddings_index = faiss.read_index(str(faiss_file))
         
-        # Load table ID mapping
-        mapping_file = self.catalog_dir / "table_mapping.json"
+        # Load table ID mapping and detect embedding type
+        mapping_file = self.catalog_dir / "table_mapping_enhanced.json"
         if not mapping_file.exists():
-            raise FileNotFoundError(f"Table mapping not found: {mapping_file}")
+            raise FileNotFoundError(f"Enhanced table mapping not found: {mapping_file}")
         
         with open(mapping_file) as f:
             mapping_data = json.load(f)
         self.table_ids = mapping_data['table_ids']
         
-        # Load embedding model
-        self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+        # Detect embedding type and initialize appropriate model
+        embedding_type = mapping_data.get('embedding_type', 'sentence_transformers')
+        embedding_dimension = mapping_data.get('embedding_dimension', 768)
+        
+        if embedding_type == 'openai' or embedding_dimension == 3072:
+            # Use OpenAI embeddings
+            if not OPENAI_AVAILABLE:
+                raise ImportError("OpenAI package required for OpenAI table embeddings. Install with: pip install openai")
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY environment variable required for OpenAI embeddings")
+            self.openai_client = OpenAI(api_key=api_key)
+            self.use_openai_embeddings = True
+            logger.info(f"Using OpenAI embeddings for table search (dimension: {embedding_dimension})")
+        else:
+            # Use SentenceTransformers
+            self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            self.use_openai_embeddings = False
+            logger.info(f"Using SentenceTransformers for table search (dimension: {embedding_dimension})")
         
         logger.info(f"Loaded FAISS index with {len(self.table_ids)} embeddings")
     
+    def _generate_query_embedding(self, query: str) -> np.ndarray:
+        """Generate query embedding using the same model as the index"""
+        if self.use_openai_embeddings:
+            response = self.openai_client.embeddings.create(
+                input=[query],
+                model="text-embedding-3-large"
+            )
+            embedding = np.array([response.data[0].embedding], dtype=np.float32)
+            return embedding
+        else:
+            return self.embedding_model.encode([query]).astype('float32')
+    
     def search_tables(self, query: str, k: int = 5,
                      geographic_context: Optional[GeographicContext] = None) -> List[Dict]:
-        """Search for relevant tables using coarse retrieval"""
+        """Search for relevant tables using FAISS index"""
         
-        # Create query embedding
-        query_embedding = self.embedding_model.encode([query]).astype('float32')
+        # Generate query embedding using the same model as the index
+        query_embedding = self._generate_query_embedding(query)
         
-        # Search FAISS index
+        # Search FAISS index for similar tables
         distances, indices = self.embeddings_index.search(query_embedding, k * 2)  # Get extra for filtering
         
-        results = []
+        # Convert results to table data
+        table_scores = []
         for distance, idx in zip(distances[0], indices[0]):
-            if idx == -1:  # Invalid index
+            if idx == -1 or idx >= len(self.table_ids):
+                continue
+                
+            table_id = self.table_ids[idx]
+            table_data = self.tables.get(table_id)
+            
+            if not table_data:
+                logger.warning(f"Table {table_id} not found in catalog")
                 continue
             
-            table_id = self.table_ids[idx]
-            table_data = self.tables[table_id]
+            # Convert L2 distance to similarity score (0-1)
+            # L2 distance of 0 = perfect match, larger distances = less similar
+            similarity = max(0.0, 1.0 - (distance / 2.0))  # Normalize distance to 0-1 range
             
-            # Calculate confidence (convert L2 distance to similarity)
-            confidence = max(0.0, 1.0 - (distance / 2.0))
-            
-            # Apply geographic filtering if context provided
-            geographic_relevance = 1.0
-            if geographic_context and geographic_context.location_mentioned:
-                geographic_relevance = self._calculate_geographic_relevance(
-                    table_data, geographic_context
-                )
-            
-            # Combined score
-            combined_score = confidence * (0.7 + 0.3 * geographic_relevance)
-            
-            results.append({
+            table_scores.append({
                 'table_id': table_id,
                 'table_data': table_data,
-                'confidence': confidence,
-                'geographic_relevance': geographic_relevance,
-                'combined_score': combined_score
+                'confidence': similarity,
+                'distance': distance
             })
+        
+        # Apply geographic filtering and return top k
+        results = []
+        for table_result in table_scores[:k * 2]:  # Get extra for filtering
+            try:
+                # Apply geographic filtering if context provided
+                geographic_relevance = 1.0
+                if geographic_context and geographic_context.location_mentioned:
+                    geographic_relevance = self._calculate_geographic_relevance(
+                        table_result['table_data'], geographic_context
+                    )
+                
+                # Combined score
+                combined_score = table_result['confidence'] * (0.7 + 0.3 * geographic_relevance)
+                
+                table_result['geographic_relevance'] = geographic_relevance
+                table_result['combined_score'] = combined_score
+                results.append(table_result)
+                
+            except Exception as e:
+                logger.warning(f"Error calculating geographic relevance: {e}")
+                continue
         
         # Sort by combined score and return top k
         results.sort(key=lambda x: x['combined_score'], reverse=True)
@@ -271,26 +338,58 @@ class ConceptBasedVariableSearch:
         with open(metadata_file) as f:
             self.variables_metadata = json.load(f)
         
-        # Load build info to understand structure
+        # Load build info to understand structure and embedding model
         build_info_file = self.variables_dir / "build_info.json"
+        self.use_openai_embeddings = False
+        
         if build_info_file.exists():
             with open(build_info_file) as f:
                 build_info = json.load(f)
             structure_type = build_info.get('structure_type', 'unknown')
+            embedding_dimension = build_info.get('embedding_dimension', 768)
+            
+            # Detect if OpenAI embeddings were used (3072 dimensions)
+            if embedding_dimension == 3072:
+                self.use_openai_embeddings = True
+                if not OPENAI_AVAILABLE:
+                    raise ImportError("OpenAI package required to query OpenAI-embedded index. Install with: pip install openai")
+                api_key = os.getenv('OPENAI_API_KEY')
+                if not api_key:
+                    raise ValueError("OPENAI_API_KEY environment variable required for OpenAI embeddings")
+                self.openai_client = OpenAI(api_key=api_key)
+                logger.info(f"Using OpenAI embeddings (dimension: {embedding_dimension})")
+            else:
+                self.use_openai_embeddings = False
+                self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+                logger.info(f"Using SentenceTransformers (dimension: {embedding_dimension})")
+            
             logger.info(f"Variables database structure: {structure_type}")
-        
-        # Load embedding model
-        self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+        else:
+            # Fallback to sentence transformers
+            self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            logger.info("No build info found, defaulting to SentenceTransformers")
         
         logger.info(f"Loaded {len(self.variables_metadata)} concept-based variables")
+    
+    def _generate_query_embedding(self, query: str) -> np.ndarray:
+        """Generate query embedding using the same model as the index"""
+        if self.use_openai_embeddings:
+            response = self.openai_client.embeddings.create(
+                input=[query],
+                model="text-embedding-3-large"
+            )
+            embedding = np.array([response.data[0].embedding], dtype=np.float32)
+            return embedding
+        else:
+            return self.embedding_model.encode([query]).astype('float32')
     
     def search_within_table(self, table_id: str, query: str,
                           geographic_context: Optional[GeographicContext] = None,
                           k: int = 10) -> List[Dict]:
         """Search for variables within a specific table using concept-based index"""
         
-        # Create query embedding
-        query_embedding = self.embedding_model.encode([query]).astype('float32')
+        # Create query embedding using the same model as the index
+        query_embedding = self._generate_query_embedding(query)
         
         # Search FAISS index for broader results
         distances, indices = self.variables_index.search(query_embedding, k * 5)  # Get extra for table filtering
@@ -302,7 +401,10 @@ class ConceptBasedVariableSearch:
                 continue
             
             var_metadata = self.variables_metadata[idx]
-            var_table_id = var_metadata.get('variable_id', '').split('_')[0]
+            variable_id = var_metadata.get('variable_id', '')
+            
+            # Extract table ID from variable ID
+            var_table_id = variable_id.split('_')[0] if '_' in variable_id else ''
             
             # Skip if not from the target table
             if var_table_id != table_id:
@@ -320,7 +422,7 @@ class ConceptBasedVariableSearch:
             
             # Prioritize _001E (total) variables unless query is specific
             structure_bonus = self._calculate_structure_bonus(
-                var_metadata.get('variable_id', ''), query
+                variable_id, query
             )
             
             # Combined score
@@ -413,7 +515,7 @@ class ConceptBasedCensusSearchEngine:
             logger.info(f"Geographic context: {geo_context.location_text} ({geo_context.geography_level})")
         
         # Coarse retrieval: find relevant tables
-        table_results = self.table_search.search_tables(query, k=5, geographic_context=geo_context)
+        table_results = self.table_search.search_tables(query, k=10, geographic_context=geo_context)  # Increased from 5 to 10
         logger.info(f"Found {len(table_results)} candidate tables")
         
         # Fine retrieval: search within top tables
@@ -475,8 +577,8 @@ class ConceptBasedCensusSearchEngine:
                 search_result = SearchResult(
                     variable_id=variable_id,
                     table_id=table_id,
-                    concept=var_metadata.get('concept', ''),
-                    label=var_metadata.get('label', ''),
+                    concept=var_metadata.get('concept_name', var_metadata.get('concept', '')),  # Use concept_name first
+                    label=var_metadata.get('description', var_metadata.get('label', '')),  # Use description first
                     title=table_data.get('title', ''),
                     universe=table_data.get('universe', ''),
                     confidence=combined_confidence,

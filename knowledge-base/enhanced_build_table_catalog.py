@@ -28,6 +28,22 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import faiss
 
+# OpenAI for embeddings (optional)
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    import os
+    env_path = Path(__file__).parent.parent / '.env'
+    load_dotenv(env_path)
+except ImportError:
+    import os
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -43,10 +59,25 @@ class EnhancedTableCatalogExtractor(ConceptBasedTableCatalogExtractor):
     def __init__(self, 
                  canonical_path: str = "source-docs/canonical_variables_refactored.json",
                  table_list_path: str = "source-docs/acs_table_shells/2023_DataProductList.xlsx",
-                 keywords_catalog_path: str = "table-catalog/table_catalog_with_keywords.json"):
+                 keywords_catalog_path: str = "table-catalog/table_catalog_with_keywords.json",
+                 use_openai: bool = False):
         super().__init__(canonical_path, table_list_path)
         self.keywords_catalog_path = Path(keywords_catalog_path)
         self.keywords_data = self._load_keywords_catalog()
+        self.use_openai = use_openai
+        
+        # Initialize embedding model or OpenAI client
+        if self.use_openai:
+            if not OPENAI_AVAILABLE:
+                raise ImportError("OpenAI package required for --use-openai. Install with: pip install openai")
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY environment variable required for --use-openai")
+            self.openai_client = OpenAI(api_key=api_key)
+            logger.info("Using OpenAI embeddings for table catalog")
+        else:
+            self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            logger.info("Using SentenceTransformers for table catalog")
     
     def _load_keywords_catalog(self) -> Dict:
         """Load catalog with generated keywords"""
@@ -72,9 +103,6 @@ class EnhancedTableCatalogExtractor(ConceptBasedTableCatalogExtractor):
     def create_enhanced_embeddings(self, catalogs: List[TableCatalog]) -> Tuple[np.ndarray, List[str]]:
         """Create enhanced embeddings including keywords when available"""
         logger.info("Creating enhanced table embeddings with keywords...")
-        
-        if not self.embedding_model:
-            self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
         
         embedding_texts = []
         table_ids = []
@@ -132,13 +160,45 @@ class EnhancedTableCatalogExtractor(ConceptBasedTableCatalogExtractor):
             embedding_texts.append(embedding_text)
             table_ids.append(catalog.table_id)
         
-        # Generate embeddings
-        embeddings = self.embedding_model.encode(embedding_texts, show_progress_bar=True)
+        # Generate embeddings using either OpenAI or SentenceTransformers
+        if self.use_openai:
+            embeddings = self._generate_openai_embeddings(embedding_texts)
+        else:
+            if not self.embedding_model:
+                self.embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            embeddings = self.embedding_model.encode(embedding_texts, show_progress_bar=True)
         
         logger.info(f"Generated enhanced embeddings for {len(embeddings)} tables")
         logger.info(f"Keywords used in {keywords_used_count} embeddings")
         
         return embeddings, table_ids
+    
+    def _generate_openai_embeddings(self, texts: List[str]) -> np.ndarray:
+        """Generate OpenAI embeddings for table texts"""
+        import time
+        
+        embeddings = []
+        batch_size = 100  # OpenAI batch limit
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            
+            logger.info(f"🧠 Generating OpenAI embeddings for batch {batch_num}/{total_batches} ({len(batch_texts)} tables)...")
+            
+            response = self.openai_client.embeddings.create(
+                input=batch_texts,
+                model="text-embedding-3-large"
+            )
+            
+            batch_embeddings = [item.embedding for item in response.data]
+            embeddings.extend(batch_embeddings)
+            
+            # Rate limiting
+            time.sleep(0.1)
+        
+        return np.array(embeddings, dtype=np.float32)
     
     def save_enhanced_catalog(self, catalogs: List[TableCatalog], embeddings: np.ndarray,
                             table_ids: List[str], output_dir: str = "table-catalog"):
@@ -221,7 +281,7 @@ class EnhancedTableCatalogExtractor(ConceptBasedTableCatalogExtractor):
                     'keywords_integrated': keywords_used,
                     'keywords_coverage': f"{keywords_used}/{len(catalogs)} ({keywords_used/len(catalogs)*100:.1f}%)",
                     'extraction_stats': dict(self.stats),
-                    'embedding_model_used': 'sentence-transformers/all-mpnet-base-v2',
+                    'embedding_model_used': 'text-embedding-3-large' if self.use_openai else 'sentence-transformers/all-mpnet-base-v2',
                     'enhancement_features': [
                         'Primary keywords prioritized in embeddings',
                         'User-friendly summaries included',
@@ -257,7 +317,9 @@ class EnhancedTableCatalogExtractor(ConceptBasedTableCatalogExtractor):
                 'embedding_dimension': dimension,
                 'total_embeddings': len(table_ids),
                 'keywords_integrated': keywords_used,
-                'embedding_enhancement': 'keywords_v1.0'
+                'embedding_enhancement': 'keywords_v1.0',
+                'embedding_model': 'text-embedding-3-large' if self.use_openai else 'sentence-transformers/all-mpnet-base-v2',
+                'embedding_type': 'openai' if self.use_openai else 'sentence_transformers'
             }, f, indent=2)
         
         logger.info(f"Saved enhanced FAISS embeddings to {faiss_file}")
@@ -276,6 +338,8 @@ def main():
     parser = argparse.ArgumentParser(description='Enhanced Table Catalog Builder with Keywords')
     parser.add_argument('--use-keywords', action='store_true', 
                        help='Use keywords catalog for enhanced embeddings')
+    parser.add_argument('--use-openai', action='store_true',
+                       help='Use OpenAI embeddings instead of SentenceTransformers')
     parser.add_argument('--keywords-catalog', 
                        default='table-catalog/table_catalog_with_keywords.json',
                        help='Path to catalog with generated keywords')
@@ -290,7 +354,8 @@ def main():
         logger.info("🎯 Creating search-optimized embeddings")
         
         extractor = EnhancedTableCatalogExtractor(
-            keywords_catalog_path=args.keywords_catalog
+            keywords_catalog_path=args.keywords_catalog,
+            use_openai=args.use_openai
         )
     else:
         logger.info("🚀 Starting Standard Table Catalog Extraction...")
