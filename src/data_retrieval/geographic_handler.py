@@ -1,8 +1,10 @@
+#!/usr/bin/env python3
 """
-Geographic Handler for Census MCP - SQLite-based location resolution
-
-Replaces the broken hardcoded MAJOR_CITIES approach with comprehensive 
-database lookup covering 29,573 US places.
+Production Geographic Handler
+- Uses SQLite database with 29,573 places
+- Hot cache for top 500 cities (<1ms lookups)
+- Multi-strategy resolution with fuzzy matching
+- Proper FIPS code resolution for Census API
 """
 
 import sqlite3
@@ -14,59 +16,89 @@ import re
 logger = logging.getLogger(__name__)
 
 class GeographicHandler:
-    """Handles geographic location resolution using SQLite database"""
+    """Production geographic resolution with SQLite database"""
     
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: Optional[Path] = None):
         if db_path is None:
-            # Find the database relative to project root
-            current_dir = Path(__file__).parent  # src/data_retrieval/
-            project_root = current_dir.parent.parent  # project root
+            # Geography database is at ../knowledge-base/geo-db/geography.db
+            current_dir = Path(__file__).parent
+            project_root = current_dir.parent.parent  # Go up to project root
             db_path = project_root / "knowledge-base" / "geo-db" / "geography.db"
+        
         self.db_path = Path(db_path)
         self.conn = None
         self.hot_cache = {}
+        
+        # Initialize database connection
         self._init_database()
         self._load_hot_cache()
     
     def _init_database(self):
-        """Initialize database connection"""
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"Geography database not found at {self.db_path}")
-        
+        """Initialize SQLite database connection"""
         try:
-            self.conn = sqlite3.connect(str(self.db_path))
-            self.conn.row_factory = sqlite3.Row  # Enable dict-like access
+            if not self.db_path.exists():
+                raise FileNotFoundError(f"Geography database not found: {self.db_path}")
+            
+            self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row  # Enable column access by name
+            
+            # Verify database structure
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            required_tables = ['places', 'counties', 'states']
+            missing_tables = [t for t in required_tables if t not in tables]
+            
+            if missing_tables:
+                raise ValueError(f"Database missing required tables: {missing_tables}")
+            
             logger.info(f"✅ Geographic database connected: {self.db_path}")
+            
         except Exception as e:
-            raise RuntimeError(f"Failed to connect to geography database: {e}")
+            logger.error(f"❌ Failed to initialize geographic database: {e}")
+            raise
     
     def _load_hot_cache(self):
-        """Load top 500 cities into memory for fast access"""
+        """Load top 500 cities into memory for instant lookups"""
+        if not self.conn:
+            return
+        
         try:
             cursor = self.conn.cursor()
-            # Get most populous places for hot cache
+            
+            # Load top cities by population and major cities (using actual schema)
             cursor.execute("""
-                SELECT name_lower, place_fips, state_fips, state_abbrev, name
+                SELECT place_fips, state_fips, state_abbrev, name, 
+                       LOWER(name || ', ' || state_abbrev) as cache_key
                 FROM places 
-                ORDER BY CASE 
-                    WHEN name_lower IN ('new york', 'los angeles', 'chicago', 'houston', 
-                                       'philadelphia', 'phoenix', 'san antonio', 'san diego',
-                                       'dallas', 'austin', 'jacksonville', 'fort worth',
-                                       'columbus', 'charlotte', 'san francisco', 'indianapolis',
-                                       'seattle', 'denver', 'washington', 'boston') THEN 0
-                    ELSE 1 
-                END, name
+                ORDER BY 
+                    CASE WHEN LOWER(name) IN (
+                        'new york', 'los angeles', 'chicago', 'houston', 'phoenix',
+                        'philadelphia', 'san antonio', 'san diego', 'dallas', 'austin',
+                        'jacksonville', 'fort worth', 'columbus', 'charlotte', 'detroit',
+                        'el paso', 'seattle', 'denver', 'washington', 'boston',
+                        'nashville', 'baltimore', 'oklahoma city', 'portland', 'las vegas',
+                        'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento',
+                        'kansas city', 'mesa', 'atlanta', 'omaha', 'colorado springs',
+                        'raleigh', 'long beach', 'virginia beach', 'miami', 'minneapolis',
+                        'oakland', 'tulsa', 'arlington', 'new orleans', 'wichita',
+                        'cleveland', 'tampa', 'bakersfield', 'honolulu', 'st. louis'
+                    ) THEN 0 ELSE 1 END,
+                    COALESCE(population, 0) DESC,
+                    land_area DESC
                 LIMIT 500
             """)
             
             for row in cursor.fetchall():
-                cache_key = f"{row['name_lower']}, {row['state_abbrev'].lower()}"
+                cache_key = row['cache_key']
                 self.hot_cache[cache_key] = {
                     'place_fips': row['place_fips'],
                     'state_fips': row['state_fips'],
                     'state_abbrev': row['state_abbrev'],
                     'name': row['name'],
-                    'geography': 'place'
+                    'geography': 'place',
+                    'resolution_method': 'hot_cache'
                 }
             
             logger.info(f"✅ Hot cache loaded: {len(self.hot_cache)} cities")
@@ -77,118 +109,223 @@ class GeographicHandler:
     
     def resolve_location(self, location_string: str) -> Dict[str, Any]:
         """
-        Resolve location string with GPT-level contextual reasoning
+        Resolve location string to proper FIPS codes
         
         Multi-strategy approach:
-        1. Hot cache (instant)
-        2. Direct state resolution (NEW - fixes the bug)
-        3. Exact database match  
-        4. Fuzzy matching with name variations
-        5. Cross-type lookup (places → counties for independent cities)
-        6. Spatial reasoning (metro areas, adjacent counties)
-        7. Smart suggestions on failure
+        1. Hot cache (instant for top 500 cities)
+        2. Exact database match
+        3. Fuzzy matching with name variations  
+        4. State-only fallback
+        5. Smart suggestions on failure
+        
+        Returns:
+            Dict with geography, state_fips, place_fips, state_abbrev, name, resolution_method
         """
         location = location_string.strip()
         
-        # National level
-        if location.lower() in ['united states', 'usa', 'us', 'america']:
+        # Handle national level
+        if location.lower() in ['united states', 'usa', 'us', 'america', 'national']:
             return {
                 'geography': 'us',
                 'state_fips': None,
                 'place_fips': None,
                 'state_abbrev': None,
+                'name': 'United States',
                 'resolution_method': 'national_keyword'
             }
         
-        # NEW: Direct state resolution (fixes the main bug)
-        state_result = self._resolve_state_direct(location)
-        if state_result:
-            state_result['resolution_method'] = 'state_direct'
-            logger.debug(f"✅ Direct state match: {location} → {state_result}")
-            return state_result
-        
-        # Strategy 1: Hot cache check (fastest path)
-        location_lower = location.lower()
-        if location_lower in self.hot_cache:
+        # Strategy 1: Hot cache check (fastest path <1ms)
+        location_key = location.lower()
+        if location_key in self.hot_cache:
             logger.debug(f"✅ Hot cache hit: {location}")
-            result = self.hot_cache[location_lower].copy()
-            result['resolution_method'] = 'hot_cache'
-            return result
+            return self.hot_cache[location_key]
         
-        # Strategy 2: Parse and normalize location components
-        parsed_variants = self._generate_location_variants(location)
-        if not parsed_variants:
+        # Strategy 2: Parse location components
+        parsed = self._parse_location_components(location)
+        if not parsed:
             return self._fail_with_suggestions(location, "Could not parse location format")
         
-        # Strategy 3: Try each variant with escalating strategies
-        for variant in parsed_variants:
-            city_name = variant['city']
-            state = variant['state']
-            
-            # 3a: Exact database match
-            result = self._exact_database_lookup(city_name, state)
-            if result:
-                result['resolution_method'] = 'exact_match'
-                result['variant_used'] = f"{city_name}, {state}"
-                logger.debug(f"✅ Exact match: {location} → {result}")
-                return result
-            
-            # 3b: Fuzzy matching using name_variations table
-            result = self._fuzzy_database_lookup(city_name, state)
-            if result:
-                result['resolution_method'] = 'fuzzy_match'
-                result['variant_used'] = f"{city_name}, {state}"
-                logger.debug(f"✅ Fuzzy match: {location} → {result}")
-                return result
-            
-            # 3c: Cross-type lookup (independent cities as county-equivalents)
-            result = self._county_equivalent_lookup(city_name, state)
-            if result:
-                result['resolution_method'] = 'county_equivalent'
-                result['variant_used'] = f"{city_name}, {state}"
-                logger.debug(f"✅ County-equivalent match: {location} → {result}")
-                return result
+        city_name = parsed['city']
+        state_abbrev = parsed['state']
         
-        # Strategy 4: Metro area / CBSA lookup
-        result = self._metro_area_lookup(location)
+        # Strategy 3: Exact database match
+        result = self._exact_database_lookup(city_name, state_abbrev)
         if result:
-            result['resolution_method'] = 'metro_area'
-            logger.debug(f"✅ Metro area match: {location} → {result}")
+            logger.debug(f"✅ Exact database match: {location}")
+            result['resolution_method'] = 'exact_match'
             return result
         
-        # Strategy 5: State-only fallback (graceful degradation)
-        for variant in parsed_variants:
-            state_result = self._resolve_state_direct(variant['state'])
-            if state_result:
-                state_result['resolution_method'] = 'state_fallback'
-                state_result['warning'] = f"City '{variant['city']}' not found, using state-level data"
-                logger.debug(f"⚠️ State fallback: {location} → {variant['state']}")
-                return state_result
+        # Strategy 4: Fuzzy matching
+        result = self._fuzzy_database_lookup(city_name, state_abbrev)
+        if result:
+            logger.debug(f"✅ Fuzzy match: {location} → {result['name']}")
+            result['resolution_method'] = 'fuzzy_match'
+            return result
         
-        # Strategy 6: Intelligent failure with suggestions
-        return self._fail_with_suggestions(location, "No geographic match found")
+        # Strategy 5: State-only fallback
+        result = self._resolve_state_only(state_abbrev)
+        if result:
+            logger.debug(f"✅ State fallback: {location} → {state_abbrev}")
+            result['resolution_method'] = 'state_fallback'
+            return result
+        
+        # Strategy 6: Final failure with suggestions
+        return self._fail_with_suggestions(location, "Location not found in database")
     
-    def _resolve_state_direct(self, location: str) -> Optional[Dict[str, Any]]:
-        """
-        FIXED: Query database for states instead of hardcoded dictionary
-        Handles both state abbreviations (MD) and full names (Maryland)
-        """
+    def _parse_location_components(self, location: str) -> Optional[Dict[str, str]]:
+        """Parse various location formats into city and state components"""
+        location = location.strip()
+        
+        # Format: "City, ST" (most common)
+        if ',' in location:
+            parts = [part.strip() for part in location.split(',')]
+            if len(parts) == 2:
+                city_name = parts[0]
+                state = parts[1].upper()
+                
+                # Validate state abbreviation
+                if len(state) == 2 and state.isalpha():
+                    return {'city': city_name, 'state': state}
+        
+        # Format: "City ST" (space-separated)
+        parts = location.split()
+        if len(parts) >= 2:
+            potential_state = parts[-1].upper()
+            if len(potential_state) == 2 and potential_state.isalpha():
+                city_name = ' '.join(parts[:-1])
+                return {'city': city_name, 'state': potential_state}
+        
+        # Single word - might be a state
+        if len(location.split()) == 1:
+            state_result = self._resolve_state_name(location)
+            if state_result:
+                return {'city': None, 'state': state_result['state_abbrev']}
+        
+        return None
+    
+    def _exact_database_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
+        """Exact database lookup for city in state with place type handling"""
+        if not self.conn or not city_name:
+            return None
+        
         try:
             cursor = self.conn.cursor()
             
-            # First check if states table exists and what columns it has
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='states'")
-            if not cursor.fetchone():
-                logger.debug("No states table found, checking for state data in other tables")
-                return None
+            # Try exact match first
+            cursor.execute("""
+                SELECT place_fips, state_fips, state_abbrev, name
+                FROM places 
+                WHERE name_lower = LOWER(?) AND state_abbrev = ?
+                LIMIT 1
+            """, (city_name, state_abbrev))
             
-            # Try both abbreviation and full name matching - FIXED column names
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'geography': 'place',
+                    'place_fips': row['place_fips'],
+                    'state_fips': row['state_fips'],
+                    'state_abbrev': row['state_abbrev'],
+                    'name': row['name']
+                }
+            
+            # Try with common place type suffixes
+            place_types = ['city', 'town', 'village', 'borough', 'township']
+            for place_type in place_types:
+                cursor.execute("""
+                    SELECT place_fips, state_fips, state_abbrev, name
+                    FROM places 
+                    WHERE name_lower = LOWER(?) AND state_abbrev = ?
+                    LIMIT 1
+                """, (f"{city_name} {place_type}", state_abbrev))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'geography': 'place',
+                        'place_fips': row['place_fips'],
+                        'state_fips': row['state_fips'],
+                        'state_abbrev': row['state_abbrev'],
+                        'name': row['name']
+                    }
+            
+        except Exception as e:
+            logger.error(f"Database lookup error: {e}")
+        
+        return None
+    
+    def _fuzzy_database_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
+        """Fuzzy matching for common city name variations (using actual schema)"""
+        if not self.conn or not city_name:
+            return None
+        
+        try:
+            cursor = self.conn.cursor()
+            
+            # Generate name variations
+            variations = self._generate_name_variations(city_name)
+            
+            for variation in variations:
+                cursor.execute("""
+                    SELECT place_fips, state_fips, state_abbrev, name
+                    FROM places 
+                    WHERE name_lower = LOWER(?) AND state_abbrev = ?
+                    LIMIT 1
+                """, (variation, state_abbrev))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'geography': 'place',
+                        'place_fips': row['place_fips'],
+                        'state_fips': row['state_fips'],
+                        'state_abbrev': row['state_abbrev'],
+                        'name': row['name'],
+                        'original_query': city_name,
+                        'matched_variation': variation
+                    }
+            
+        except Exception as e:
+            logger.error(f"Fuzzy lookup error: {e}")
+        
+        return None
+    
+    def _generate_name_variations(self, city_name: str) -> List[str]:
+        """Generate common variations of city names"""
+        variations = [city_name]
+        name_lower = city_name.lower()
+        
+        # Saint <-> St. variations
+        if name_lower.startswith('saint '):
+            variations.append('St. ' + city_name[6:])
+        elif name_lower.startswith('st. '):
+            variations.append('Saint ' + city_name[4:])
+        elif name_lower.startswith('st '):
+            variations.append('Saint ' + city_name[3:])
+        
+        # Remove periods (St. Paul → St Paul)
+        if '.' in city_name:
+            variations.append(city_name.replace('.', ''))
+        
+        # Add periods (St Paul → St. Paul)
+        if ' st ' in name_lower:
+            variations.append(city_name.replace(' St ', ' St. '))
+        
+        return variations
+    
+    def _resolve_state_only(self, state_abbrev: str) -> Optional[Dict[str, Any]]:
+        """Resolve state-level geography (using actual schema)"""
+        if not self.conn or not state_abbrev:
+            return None
+        
+        try:
+            cursor = self.conn.cursor()
             cursor.execute("""
                 SELECT state_fips, state_abbrev, state_name
                 FROM states 
-                WHERE state_abbrev = ? OR LOWER(state_name) = ?
+                WHERE state_abbrev = ?
                 LIMIT 1
-            """, (location.upper(), location.lower()))
+            """, (state_abbrev,))
             
             row = cursor.fetchone()
             if row:
@@ -199,337 +336,145 @@ class GeographicHandler:
                     'state_abbrev': row['state_abbrev'],
                     'name': row['state_name']
                 }
-            
-            return None
-            
+                
         except Exception as e:
-            logger.error(f"State database lookup failed: {e}")
-            # Fallback to checking if this looks like a state abbreviation
-            if len(location) == 2 and location.upper().isalpha():
-                logger.warning(f"States table query failed, but {location} looks like state abbreviation")
-            return None
-    
-    def _generate_location_variants(self, location: str) -> List[Dict[str, str]]:
-        """Generate intelligent variants of the location string"""
-        variants = []
-        
-        # Parse basic format first
-        parsed = self._parse_location_components(location)
-        if not parsed:
-            return variants
-        
-        city_name = parsed['city']
-        state = parsed['state']
-        
-        # Generate name variants using linguistic intelligence
-        city_variants = self._generate_city_name_variants(city_name)
-        
-        for city_variant in city_variants:
-            variants.append({'city': city_variant, 'state': state})
-        
-        return variants
-    
-    def _generate_city_name_variants(self, city_name: str) -> List[str]:
-        """Generate intelligent city name variants"""
-        variants = [city_name.lower()]
-        name_lower = city_name.lower()
-        
-        # Saint/St. variations (both directions)
-        if 'saint ' in name_lower:
-            variants.append(name_lower.replace('saint ', 'st. '))
-            variants.append(name_lower.replace('saint ', 'st '))
-        elif 'st. ' in name_lower:
-            variants.append(name_lower.replace('st. ', 'saint '))
-            variants.append(name_lower.replace('st. ', 'st '))
-        elif ' st ' in name_lower:
-            variants.append(name_lower.replace(' st ', ' saint '))
-            variants.append(name_lower.replace(' st ', ' st. '))
-        
-        # Remove/add common suffixes intelligently
-        suffixes_to_try = ['city', 'town', 'village', 'borough']
-        
-        # If it has a suffix, try without it
-        for suffix in suffixes_to_try:
-            if name_lower.endswith(f' {suffix}'):
-                variants.append(name_lower.replace(f' {suffix}', ''))
-        
-        # If it doesn't have a suffix, try adding common ones
-        if not any(name_lower.endswith(f' {suffix}') for suffix in suffixes_to_try):
-            variants.append(f"{name_lower} city")
-        
-        return list(set(variants))  # Remove duplicates
-    
-    def _exact_database_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
-        """Exact database lookup with precise matching"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name
-                FROM places 
-                WHERE name_lower = ? AND state_abbrev = ?
-                LIMIT 1
-            """, (city_name.lower(), state_abbrev))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'geography': 'place',
-                    'place_fips': row['place_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name']
-                }
-            return None
-        except Exception as e:
-            logger.error(f"Exact database lookup failed: {e}")
-            return None
-    
-    def _fuzzy_database_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
-        """Fuzzy matching using name_variations table and similarity"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # First try name_variations table
-            cursor.execute("""
-                SELECT p.place_fips, p.state_fips, p.state_abbrev, p.name
-                FROM name_variations nv
-                JOIN places p ON nv.place_fips = p.place_fips AND nv.state_fips = p.state_fips
-                WHERE nv.variation = ? AND p.state_abbrev = ? AND nv.geography_type = 'place'
-                LIMIT 1
-            """, (city_name.lower(), state_abbrev))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'geography': 'place',
-                    'place_fips': row['place_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name']
-                }
-            
-            # Fall back to LIKE matching for partial matches
-            cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name, name_lower
-                FROM places 
-                WHERE state_abbrev = ? AND (
-                    name_lower LIKE ? OR 
-                    name_lower LIKE ?
-                )
-                ORDER BY 
-                    CASE WHEN name_lower = ? THEN 0 ELSE 1 END,
-                    LENGTH(name_lower)
-                LIMIT 3
-            """, (
-                state_abbrev,
-                f"%{city_name.lower()}%",
-                f"{city_name.lower()}%",
-                city_name.lower()
-            ))
-            
-            rows = cursor.fetchall()
-            if rows:
-                # Return best match (prefer exact substring matches)
-                best_row = rows[0]
-                return {
-                    'geography': 'place',
-                    'place_fips': best_row['place_fips'],
-                    'state_fips': best_row['state_fips'],
-                    'state_abbrev': best_row['state_abbrev'],
-                    'name': best_row['name']
-                }
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Fuzzy database lookup failed: {e}")
-            return None
-    
-    def _county_equivalent_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
-        """Check for independent cities in counties table (like St. Louis)"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # Look for city name in counties table (independent cities)
-            cursor.execute("""
-                SELECT county_fips, state_fips, state_abbrev, name
-                FROM counties 
-                WHERE name_lower LIKE ? AND state_abbrev = ?
-                ORDER BY 
-                    CASE WHEN name_lower = ? THEN 0 ELSE 1 END,
-                    LENGTH(name_lower)
-                LIMIT 1
-            """, (f"%{city_name.lower()}%", state_abbrev, city_name.lower()))
-            
-            row = cursor.fetchone()
-            if row:
-                # Return as county geography for independent cities
-                return {
-                    'geography': 'county',
-                    'county_fips': row['county_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name']
-                }
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"County equivalent lookup failed: {e}")
-            return None
-    
-    def _metro_area_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """Look for metro/micro statistical areas"""
-        try:
-            cursor = self.conn.cursor()
-            
-            cursor.execute("""
-                SELECT cbsa_code, name, cbsa_type
-                FROM cbsas 
-                WHERE name_lower LIKE ?
-                ORDER BY LENGTH(name_lower)
-                LIMIT 1
-            """, (f"%{location.lower()}%",))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'geography': 'cbsa',
-                    'cbsa_code': row['cbsa_code'],
-                    'name': row['name'],
-                    'cbsa_type': row['cbsa_type']
-                }
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Metro area lookup failed: {e}")
-            return None
-    
-    def _fail_with_suggestions(self, location: str, reason: str) -> Dict[str, Any]:
-        """Intelligent failure with helpful suggestions"""
-        suggestions = self.get_suggestions(location, limit=3)
-        
-        error_msg = f"Could not resolve location: {location}"
-        if suggestions:
-            error_msg += f". Did you mean: {', '.join(suggestions[:3])}?"
-        
-        return {
-            'error': error_msg,
-            'reason': reason,
-            'suggestions': suggestions,
-            'resolution_method': 'failed'
-        }
-    
-    def _parse_location_components(self, location: str) -> Optional[Dict[str, str]]:
-        """Parse 'City, ST' format"""
-        # Handle comma-separated format: "St. Louis, MO"
-        if ',' in location:
-            parts = [part.strip() for part in location.split(',')]
-            if len(parts) == 2:
-                city_name = parts[0]
-                state = parts[1].upper()
-                return {'city': city_name, 'state': state}
-        
-        # Handle space-separated format: "St. Louis MO"
-        parts = location.split()
-        if len(parts) >= 2:
-            # Last part might be state
-            potential_state = parts[-1].upper()
-            if len(potential_state) == 2 and potential_state.isalpha():
-                city_name = ' '.join(parts[:-1])
-                return {'city': city_name, 'state': potential_state}
+            logger.error(f"State lookup error: {e}")
         
         return None
     
-    def _database_lookup(self, city_name: str, state_abbrev: str) -> Optional[Dict[str, Any]]:
-        """Database lookup for city in state"""
+    def _resolve_state_name(self, state_name: str) -> Optional[Dict[str, Any]]:
+        """Resolve full state name to abbreviation (using actual schema)"""
+        if not self.conn:
+            return None
+        
         try:
             cursor = self.conn.cursor()
-            
-            # Exact match first
             cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name
-                FROM places 
-                WHERE name_lower = ? AND state_abbrev = ?
+                SELECT state_fips, state_abbrev, state_name
+                FROM states 
+                WHERE LOWER(state_name) = LOWER(?)
                 LIMIT 1
-            """, (city_name.lower(), state_abbrev))
+            """, (state_name,))
             
             row = cursor.fetchone()
             if row:
                 return {
-                    'geography': 'place',
-                    'place_fips': row['place_fips'],
+                    'geography': 'state',
                     'state_fips': row['state_fips'],
+                    'place_fips': None,
                     'state_abbrev': row['state_abbrev'],
-                    'name': row['name']
+                    'name': row['state_name']
                 }
-            
-            # Fuzzy match for common variations
-            cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name, name_lower
-                FROM places 
-                WHERE state_abbrev = ? AND (
-                    name_lower LIKE ? OR 
-                    name_lower LIKE ? OR
-                    name_lower LIKE ?
-                )
-                LIMIT 5
-            """, (
-                state_abbrev,
-                f"%{city_name.lower()}%",
-                city_name.lower().replace('saint', 'st.'),
-                city_name.lower().replace('st.', 'saint')
-            ))
-            
-            rows = cursor.fetchall()
-            if rows:
-                # Return best match (exact substring match preferred)
-                city_lower = city_name.lower()
-                for row in rows:
-                    if row['name_lower'] == city_lower:
-                        return {
-                            'geography': 'place',
-                            'place_fips': row['place_fips'],
-                            'state_fips': row['state_fips'],
-                            'state_abbrev': row['state_abbrev'],
-                            'name': row['name']
-                        }
                 
-                # Return first match if no exact match
-                row = rows[0]
-                return {
-                    'geography': 'place',
-                    'place_fips': row['place_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name']
-                }
-            
-            return None
-            
         except Exception as e:
-            logger.error(f"Database lookup failed: {e}")
-            return None
+            logger.error(f"State name lookup error: {e}")
+        
+        return None
     
-    def get_suggestions(self, location: str, limit: int = 5) -> List[str]:
-        """Get suggestions for failed location lookups"""
+    def _fail_with_suggestions(self, location: str, reason: str) -> Dict[str, Any]:
+        """Generate helpful suggestions when location resolution fails"""
+        suggestions = []
+        
+        # Try to extract partial matches for suggestions
+        if self.conn:
+            try:
+                parsed = self._parse_location_components(location)
+                if parsed and parsed['city']:
+                    cursor = self.conn.cursor()
+                    cursor.execute("""
+                        SELECT name, state_abbrev
+                        FROM places 
+                        WHERE LOWER(name) LIKE LOWER(?) AND funcstat = 'A'
+                        ORDER BY CAST(land_area_sqm AS REAL) DESC
+                        LIMIT 3
+                    """, (f"%{parsed['city']}%",))
+                    
+                    for row in cursor.fetchall():
+                        suggestions.append(f"{row['name']}, {row['state_abbrev']}")
+                        
+            except Exception as e:
+                logger.error(f"Error generating suggestions: {e}")
+        
+        return {
+            'error': f"Could not resolve location: {location}",
+            'reason': reason,
+            'suggestions': suggestions,
+            'resolution_method': 'failed',
+            'help': "Try format: 'City, ST' (e.g., 'Austin, TX') or state names (e.g., 'Minnesota')"
+        }
+
+    def get_location_suggestions(self, partial_name: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get location suggestions for partial matches"""
+        if not self.conn:
+            return []
+        
+        suggestions = []
         try:
-            parsed = self._parse_location_components(location)
-            if not parsed:
-                return []
-            
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT name, state_abbrev 
+                SELECT name, state_abbrev, place_fips, state_fips
                 FROM places 
-                WHERE name_lower LIKE ? 
-                ORDER BY name 
+                WHERE LOWER(name) LIKE LOWER(?) AND funcstat = 'A'
+                ORDER BY CAST(land_area_sqm AS REAL) DESC
                 LIMIT ?
-            """, (f"%{parsed['city'].lower()}%", limit))
+            """, (f"%{partial_name}%", limit))
             
-            return [f"{row['name']}, {row['state_abbrev']}" for row in cursor.fetchall()]
-            
+            for row in cursor.fetchall():
+                suggestions.append({
+                    'name': f"{row['name']}, {row['state_abbrev']}",
+                    'place_fips': row['place_fips'],
+                    'state_fips': row['state_fips'],
+                    'geography': 'place'
+                })
+                
         except Exception as e:
-            logger.error(f"Failed to get suggestions: {e}")
-            return []
+            logger.error(f"Error getting suggestions: {e}")
+        
+        return suggestions
+
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+# Test function
+def test_geographic_handler():
+    """Test the geographic handler with problematic locations"""
+    gh = GeographicHandler()
+    
+    test_locations = [
+        "Brainerd, MN",      # Should work now
+        "St. Louis, MO",     # Should work now
+        "Kansas City, MO",   # Should work now
+        "Minneapolis, MN",   # Should continue working
+        "Austin, TX",        # Should continue working
+        "New York, NY",      # Should continue working
+        "Nonexistent, XX",   # Should fail gracefully with suggestions
+    ]
+    
+    for location in test_locations:
+        print(f"\n🧪 Testing: {location}")
+        try:
+            result = gh.resolve_location(location)
+            
+            if 'error' in result:
+                print(f"❌ Error: {result['error']}")
+                if result.get('suggestions'):
+                    print(f"💡 Suggestions: {', '.join(result['suggestions'][:3])}")
+            else:
+                print(f"✅ Success: {result['name']}")
+                print(f"   Geography: {result['geography']}")
+                print(f"   Method: {result['resolution_method']}")
+                if result.get('place_fips'):
+                    print(f"   FIPS: {result['state_fips']}:{result['place_fips']}")
+                else:
+                    print(f"   FIPS: {result['state_fips']}")
+                    
+        except Exception as e:
+            print(f"❌ Exception: {e}")
+    
+    gh.close()
+
+if __name__ == "__main__":
+    test_geographic_handler()

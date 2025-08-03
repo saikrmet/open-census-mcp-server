@@ -4,7 +4,7 @@ Configuration management for Census MCP Server
 Handles paths, environment variables, and settings for containerized deployment.
 Supports both local development and Docker container environments.
 Pure Python implementation with direct Census API access.
-Updated for dual-path vector database architecture with FAISS integration.
+Updated for dual-path vector database architecture with OpenAI embeddings.
 """
 
 import os
@@ -22,7 +22,7 @@ class Config:
     Loads settings from environment variables, config files, and defaults.
     Container-aware for seamless Docker deployment.
     Pure Python with direct Census API access.
-    Supports dual-path vector database architecture with FAISS for instant loading.
+    Supports dual-path vector database architecture with OpenAI embeddings.
     """
     
     def __init__(self, config_file: Optional[str] = None):
@@ -65,8 +65,8 @@ class Config:
         self.claude_api_key = os.getenv('ANTHROPIC_API_KEY')
         self.openai_api_key = os.getenv('OPENAI_API_KEY')
         
-        # Embedding Configuration
-        self.embedding_model = os.getenv('EMBEDDING_MODEL', 'all-mpnet-base-v2')
+        # Embedding Configuration - Updated for OpenAI
+        self.embedding_model = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-large')
         self.embedding_dimension = self._get_embedding_dimension()
         
         # Server Configuration
@@ -94,6 +94,11 @@ class Config:
     def _get_embedding_dimension(self) -> int:
         """Get embedding dimension based on model."""
         model_dimensions = {
+            # OpenAI models
+            'text-embedding-3-large': 3072,
+            'text-embedding-3-small': 1536,
+            'text-embedding-ada-002': 1536,
+            # Legacy sentence transformer models (deprecated)
             'all-mpnet-base-v2': 768,
             'all-MiniLM-L6-v2': 384,
             'all-MiniLM-L12-v2': 384,
@@ -102,7 +107,7 @@ class Config:
         }
         
         return int(os.getenv('EMBEDDING_DIMENSION',
-                           model_dimensions.get(self.embedding_model, 768)))
+                           model_dimensions.get(self.embedding_model, 3072)))
     
     def _load_config_file(self, config_path: Optional[str] = None):
         """Load configuration from JSON file."""
@@ -143,7 +148,11 @@ class Config:
     def _validate_embedding_model(self) -> bool:
         """Validate that the embedding model is available."""
         try:
-            if self.embedding_model in ['all-mpnet-base-v2', 'all-MiniLM-L6-v2', 'all-MiniLM-L12-v2']:
+            if self.embedding_model.startswith('text-embedding-'):
+                # OpenAI model - check for API key
+                return bool(self.openai_api_key)
+            elif self.embedding_model in ['all-mpnet-base-v2', 'all-MiniLM-L6-v2', 'all-MiniLM-L12-v2']:
+                # Legacy sentence transformers model
                 try:
                     import sentence_transformers
                     return True
@@ -172,17 +181,29 @@ class Config:
         
         logger.info(f"  Container mode: {self.is_container}")
         logger.info(f"  Vector DB type: {self.vector_db_type}")
-        logger.info(f"  Embedding model: {self.embedding_model} (local, no API key)")
+        
+        # Updated embedding model logging
+        if self.embedding_model.startswith('text-embedding-'):
+            api_status = "with API key" if self.openai_api_key else "missing API key"
+            logger.info(f"  Embedding model: {self.embedding_model} (OpenAI, {api_status})")
+        else:
+            logger.info(f"  Embedding model: {self.embedding_model} (local)")
+            
         logger.info(f"  Embedding dimensions: {self.embedding_dimension}")
         logger.info(f"  Census API base: {self.census_base_url}")
         logger.info(f"  Log level: {self.log_level}")
         
-        # Check for API keys
+        # Check for API keys with updated messages
         api_keys_status = {
             "Census API": "✓" if self.census_api_key else "⚠ (optional)",
             "Claude API": "✓" if self.claude_api_key else "✗",
-            "OpenAI API": "✓" if self.openai_api_key else "⚠ (not needed for sentence transformers)"
         }
+        
+        # OpenAI key status depends on embedding model
+        if self.embedding_model.startswith('text-embedding-'):
+            api_keys_status["OpenAI API"] = "✓" if self.openai_api_key else "✗ (required for embeddings)"
+        else:
+            api_keys_status["OpenAI API"] = "✓" if self.openai_api_key else "⚠ (not needed for local embeddings)"
         
         for api, status in api_keys_status.items():
             logger.info(f"  {api} key: {status}")
