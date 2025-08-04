@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Python Census API Client with Environment Loading Fix
-FIXES:
-1. Loads .env file properly
-2. Graceful fallback when geography.db missing
-3. Can work without geographic database for basic functionality
-4. ✅ FIXED: Removed print statements that contaminated MCP protocol stdout
+Python Census API Client - v2.10 Geography-First Integration
+CRITICAL: Geography resolution is the foundation - ALL other operations depend on it
+WORKFLOW: Location → FIPS codes → Variables → API call
+NO BANDAIDS - Clean integration with gazetteer database as primary requirement
 """
 
 import os
@@ -18,414 +16,584 @@ from pathlib import Path
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    # Look for .env in parent directory (common pattern)
     env_path = Path(__file__).parent.parent.parent / '.env'
     if env_path.exists():
         load_dotenv(env_path)
-        logging.info(f"✅ Loaded environment from: {env_path}")  # ← FIXED: print → logging.info
+        logging.info(f"✅ Loaded environment from: {env_path}")
     else:
-        # Try current directory
         load_dotenv()
-        logging.info("✅ Loaded environment from current directory")  # ← FIXED: print → logging.info
+        logging.info("✅ Loaded environment from current directory")
 except ImportError:
-    logging.warning("⚠️ python-dotenv not installed, using system environment only")  # ← FIXED: print → logging.warning
+    logging.warning("⚠️ python-dotenv not installed, using system environment only")
 
-# Import the production geographic handler
+# Import geographic handler - properly integrated with CompleteGeographicHandler
+GEO_HANDLER_AVAILABLE = False
 try:
-    from .geographic_handler import GeographicHandler
-except ImportError:
-    from geographic_handler import GeographicHandler
+    from .geographic_handler import CompleteGeographicHandler
+    GEO_HANDLER_AVAILABLE = True
+    logging.info("✅ CompleteGeographicHandler loaded successfully")
+except ImportError as e:
+    GEO_HANDLER_AVAILABLE = False
+    logging.warning(f"Geographic handler not available: {e}")
+
+if not GEO_HANDLER_AVAILABLE:
+    raise ImportError("❌ CRITICAL: geographic_handler.CompleteGeographicHandler is required for geographic resolution")
 
 logger = logging.getLogger(__name__)
 
 class PythonCensusAPI:
-    """Production-ready Census API client with fallback capabilities"""
+    """Geography-first Census API client - geographic resolution is the foundation"""
     
     def __init__(self):
         self.base_url = "https://api.census.gov/data"
-        self.api_key = os.getenv('CENSUS_API_KEY')  # Should load from .env now
+        self.api_key = os.getenv('CENSUS_API_KEY')
         
-        # Initialize geographic handler with graceful fallback
-        self.geo_handler = None
-        self._init_geographic_handler()
+        # Initialize CRITICAL geographic handler - system cannot function without it
+        self.geo_handler = self._init_geographic_handler_required()
         
-        # Core variable mappings for fast path
-        self.core_mappings = {
-            'population': 'B01003_001E',
-            'total_population': 'B01003_001E',
-            'median_household_income': 'B19013_001E',
-            'median_income': 'B19013_001E',
-            'poverty_rate': 'B17001_002E',  # Numerator for rate calculation
-            'poverty_total': 'B17001_001E',  # Denominator for rate calculation
-            'median_age': 'B01002_001E',
-            'unemployment_rate': 'B23025_005E',  # Numerator
-            'labor_force': 'B23025_002E',  # Denominator
-        }
-        
-        # Report status
+        # Report initialization status
         if self.api_key:
-            logger.info("✅ Census API key loaded from environment")
+            logger.info("✅ Census API key loaded")
         else:
-            logger.warning("⚠️ Census API key not found - some features may be limited")
+            logger.warning("⚠️ Census API key missing - rate limits may apply")
+        
+        logger.info("🌍 Geography-first architecture initialized")
     
-    def _init_geographic_handler(self):
-        """Initialize geographic handler with fallback for missing database"""
+    def _init_geographic_handler_required(self) -> CompleteGeographicHandler:
+        """Initialize geographic handler - REQUIRED for system functionality"""
+        
+        if not GEO_HANDLER_AVAILABLE:
+            raise RuntimeError("❌ CRITICAL: Geographic handler not available")
+        
+        # Find gazetteer database - REQUIRED for proper geographic resolution
+        gazetteer_paths = [
+            Path(__file__).parent.parent.parent / "knowledge-base" / "geography.db",
+            Path(__file__).parent.parent.parent / "knowledge-base" / "geo-db" / "geography.db",
+            Path(__file__).parent.parent.parent / "geography.db",
+            Path(os.getcwd()) / "knowledge-base" / "geography.db",
+            Path(os.getenv('GAZETTEER_DB_PATH', '')) if os.getenv('GAZETTEER_DB_PATH') else None
+        ]
+        
+        gazetteer_path = None
+        for path in gazetteer_paths:
+            if path and path.exists():
+                gazetteer_path = path
+                logger.info(f"✅ Found gazetteer database: {path}")
+                break
+        
+        if not gazetteer_path:
+            logger.error("❌ CRITICAL: Gazetteer database not found")
+            logger.error("Geographic resolution will be severely limited without it")
+            logger.error("Expected locations:")
+            for path in gazetteer_paths[:4]:
+                logger.error(f"  - {path}")
+        
         try:
-            self.geo_handler = GeographicHandler()
-            logger.info("✅ Geographic handler initialized with production database")
+            # Initialize with the found database path
+            geo_handler = CompleteGeographicHandler(gazetteer_path)
+            
+            # Validate that geographic handler is functional
+            test_result = geo_handler.resolve_location("United States")
+            if 'error' in test_result or test_result.get('geography_type') != 'us':
+                raise RuntimeError("Geographic handler failed basic functionality test")
+            
+            logger.info("✅ Geographic handler validated and ready")
+            logger.info(f"✅ Coverage: {getattr(geo_handler, 'coverage_stats', {})}")
+            return geo_handler
+            
         except Exception as e:
-            logger.warning(f"⚠️ Geographic handler unavailable: {e}")
-            logger.info("💡 System will use basic state-level geography resolution")
-            self.geo_handler = None
+            logger.error(f"❌ CRITICAL: Geographic handler initialization failed: {e}")
+            raise RuntimeError(f"Cannot initialize geographic handler: {e}")
     
     async def get_demographic_data(self, location: str, variables: List[str],
                                  year: int = 2023, survey: str = "acs5") -> Dict[str, Any]:
         """
-        Get demographic data with fallback geographic resolution
+        Geography-first demographic data retrieval
+        
+        WORKFLOW:
+        1. Location string → Geographic parsing (CompleteGeographicHandler)
+        2. Geographic context → FIPS codes (Gazetteer)
+        3. Variables → Census IDs (Validation only - semantic resolution happens upstream)
+        4. FIPS + Census IDs → Census API call
         """
+        
+        # STEP 1: Geographic resolution - THE MOST CRITICAL STEP
+        logger.info(f"🌍 STEP 1 - Geographic resolution: '{location}'")
+        
         try:
-            # Step 1: Resolve geographic location
-            logger.info(f"🌍 Resolving location: {location}")
-            location_info = self._resolve_location(location)
-            if not location_info or 'error' in location_info:
+            location_result = self._resolve_geography_foundation(location)
+            
+            if 'error' in location_result:
+                # Geographic resolution failed - NOTHING else can proceed
+                logger.error(f"❌ Geographic resolution failed for '{location}'")
                 return {
-                    'error': f"Could not resolve location: {location}",
-                    'suggestion': location_info.get('suggestions', []) if location_info else [],
-                    'location_attempted': location
+                    'error': f"Geographic resolution failed: {location_result['error']}",
+                    'location_attempted': location,
+                    'step_failed': 'geographic_resolution',
+                    'resolution_details': location_result,
+                    'help': "Geographic resolution is required for all Census API calls. Check gazetteer database and location format.",
+                    'critical_requirement': "Valid FIPS codes are mandatory for Census Bureau API access"
                 }
             
-            # Step 2: Resolve variables to Census IDs
-            logger.info(f"🔍 Resolving variables: {variables}")
-            resolved_variables = self._resolve_variables(variables)
-            if not resolved_variables:
+            logger.info(f"✅ Geographic resolution successful: {location_result['resolved_name']}")
+            logger.info(f"   Method: {location_result['resolution_method']}")
+            logger.info(f"   Geography: {location_result['geography_type']}")
+            
+            # Log FIPS codes appropriately based on geography type
+            if location_result['geography_type'] == 'place':
+                logger.info(f"   FIPS: {location_result.get('state_fips', 'N/A')}:{location_result.get('place_fips', 'N/A')}")
+            elif location_result['geography_type'] == 'state':
+                logger.info(f"   FIPS: {location_result.get('state_fips', 'N/A')}")
+            elif location_result['geography_type'] == 'county':
+                logger.info(f"   FIPS: {location_result.get('state_fips', 'N/A')}:{location_result.get('county_fips', 'N/A')}")
+            
+        except Exception as e:
+            logger.error(f"❌ CRITICAL: Geographic resolution system failure: {e}")
+            return {
+                'error': f"Geographic resolution system failure: {str(e)}",
+                'location_attempted': location,
+                'step_failed': 'geographic_system',
+                'help': "This indicates a problem with the geographic handler or gazetteer database"
+            }
+        
+        # STEP 2: Variable validation - Secondary to geography
+        logger.info(f"🔍 STEP 2 - Variable validation: {variables}")
+        
+        try:
+            validated_variables = self._validate_census_variables(variables)
+            
+            if not validated_variables['valid_variables']:
+                logger.warning(f"⚠️ No valid Census variable IDs found in: {variables}")
                 return {
-                    'error': f"Could not resolve any variables: {variables}",
-                    'variables_attempted': variables
+                    'error': f"No valid Census variable IDs provided",
+                    'variables_attempted': variables,
+                    'step_failed': 'variable_validation',
+                    'validation_details': validated_variables,
+                    'help': "Variables must be proper Census IDs (e.g., 'B01003_001E'). Use semantic search to find correct IDs.",
+                    'location_resolved': location_result['resolved_name']  # Geography succeeded
                 }
             
-            # Step 3: Make Census API call
-            logger.info(f"📊 Fetching data from Census API")
-            census_data = await self._fetch_census_data(
-                resolved_variables, location_info, year, survey
+            logger.info(f"✅ Variable validation: {len(validated_variables['valid_variables'])} valid variables")
+            
+        except Exception as e:
+            logger.error(f"❌ Variable validation error: {e}")
+            return {
+                'error': f"Variable validation failed: {str(e)}",
+                'variables_attempted': variables,
+                'step_failed': 'variable_validation',
+                'location_resolved': location_result['resolved_name']  # Geography succeeded
+            }
+        
+        # STEP 3: Census API call - Both geography and variables validated
+        logger.info(f"📊 STEP 3 - Census API call")
+        
+        try:
+            census_data = await self._execute_census_api_call(
+                validated_variables['valid_variables'],
+                location_result,
+                year,
+                survey
             )
             
             if 'error' in census_data:
-                return census_data
+                logger.error(f"❌ Census API call failed")
+                return {
+                    'error': f"Census API call failed: {census_data['error']}",
+                    'step_failed': 'census_api_call',
+                    'location_resolved': location_result['resolved_name'],
+                    'variables_validated': validated_variables['valid_variables'],
+                    'api_details': census_data
+                }
             
-            # Step 4: Process and format response
-            return self._format_response(
-                census_data, location, location_info,
-                variables, resolved_variables, year, survey
-            )
+            logger.info(f"✅ Census API call successful")
             
         except Exception as e:
-            logger.error(f"❌ Demographic data error: {e}")
+            logger.error(f"❌ Census API call system error: {e}")
             return {
-                'error': f"System error: {str(e)}",
-                'location_attempted': location,
-                'variables_attempted': variables
+                'error': f"Census API system error: {str(e)}",
+                'step_failed': 'census_api_system',
+                'location_resolved': location_result['resolved_name'],
+                'variables_validated': validated_variables['valid_variables']
+            }
+        
+        # STEP 4: Response formatting
+        logger.info(f"📋 STEP 4 - Response formatting")
+        
+        return self._format_geography_first_response(
+            location, variables, location_result, validated_variables,
+            census_data, year, survey
+        )
+    
+    def _resolve_geography_foundation(self, location: str) -> Dict[str, Any]:
+        """
+        Foundation geographic resolution using CompleteGeographicHandler
+        
+        Returns complete geographic context with FIPS codes or clear failure
+        """
+        
+        try:
+            # Use CompleteGeographicHandler.resolve_location() method
+            geo_result = self.geo_handler.resolve_location(location)
+            
+            if 'error' in geo_result:
+                return {
+                    'error': geo_result['error'],
+                    'resolution_method': geo_result.get('resolution_method', 'unknown'),
+                    'suggestions': geo_result.get('suggestions', []),
+                    'help': geo_result.get('help', {})
+                }
+            
+            # Convert CompleteGeographicHandler result to expected format
+            return self._convert_geo_result_to_census_format(geo_result)
+            
+        except Exception as e:
+            return {
+                'error': f"Geographic resolution failed: {str(e)}",
+                'resolution_method': 'system_error'
             }
     
-    def _resolve_location(self, location: str) -> Optional[Dict[str, Any]]:
-        """Resolve location with fallback to basic parsing if database unavailable"""
+    def _convert_geo_result_to_census_format(self, geo_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert CompleteGeographicHandler result to Census API format"""
         
-        # Try production geographic handler first
-        if self.geo_handler:
-            try:
-                result = self.geo_handler.resolve_location(location)
-                if result and 'error' not in result:
-                    logger.info(f"✅ Location resolved via database: {location}")
-                    return result
-                else:
-                    logger.warning(f"⚠️ Database resolution failed, trying fallback")
-            except Exception as e:
-                logger.error(f"Geographic handler error: {e}")
+        geography_type = geo_result.get('geography_type')
         
-        # Fallback to basic parsing
-        return self._basic_location_parsing(location)
-    
-    def _basic_location_parsing(self, location: str) -> Optional[Dict[str, Any]]:
-        """Basic location parsing fallback when database unavailable"""
-        location = location.strip().lower()
+        # Base result structure
+        result = {
+            'geography_type': geography_type,
+            'resolved_name': geo_result.get('name', 'Unknown'),
+            'resolution_method': geo_result.get('resolution_method', 'unknown')
+        }
         
-        # Handle US/national
-        if location in ['united states', 'usa', 'us', 'america', 'national']:
-            return {
-                'geography': 'us',
+        # Add geography-specific FIPS codes
+        if geography_type == 'us':
+            result.update({
                 'state_fips': None,
                 'place_fips': None,
-                'state_abbrev': None,
-                'name': 'United States',
-                'resolution_method': 'basic_national'
-            }
+                'county_fips': None,
+                'cbsa_code': None,
+                'zcta_code': None
+            })
         
-        # For now, just return an error suggesting they need the geography database
-        return {
-            'error': f"Geographic database required for location resolution: {location}",
-            'suggestion': "Build geography database or use 'United States' for national data",
-            'database_location': "Expected at: ../knowledge-base/geo-db/geography.db"
-        }
+        elif geography_type == 'state':
+            result.update({
+                'state_fips': geo_result.get('state_fips'),
+                'state_abbrev': geo_result.get('state_abbrev'),
+                'place_fips': None,
+                'county_fips': None
+            })
+        
+        elif geography_type == 'place':
+            result.update({
+                'state_fips': geo_result.get('state_fips'),
+                'place_fips': geo_result.get('place_fips'),
+                'state_abbrev': geo_result.get('state_abbrev'),
+                'county_fips': None
+            })
+        
+        elif geography_type == 'county':
+            result.update({
+                'state_fips': geo_result.get('state_fips'),
+                'county_fips': geo_result.get('county_fips'),
+                'state_abbrev': geo_result.get('state_abbrev'),
+                'place_fips': None
+            })
+        
+        elif geography_type == 'cbsa':
+            result.update({
+                'cbsa_code': geo_result.get('cbsa_code'),
+                'cbsa_type': geo_result.get('cbsa_type'),
+                'state_fips': None,
+                'place_fips': None,
+                'county_fips': None
+            })
+        
+        elif geography_type == 'zcta':
+            result.update({
+                'zcta_code': geo_result.get('zcta_code'),
+                'state_fips': None,  # ZCTAs can cross state boundaries
+                'place_fips': None,
+                'county_fips': None
+            })
+        
+        # Add coordinates if available
+        if 'lat' in geo_result and 'lon' in geo_result:
+            result.update({
+                'lat': geo_result['lat'],
+                'lon': geo_result['lon']
+            })
+        
+        return result
     
-    def _resolve_variables(self, variables: List[str]) -> List[str]:
-        """Resolve variable names to Census variable IDs"""
-        resolved = []
+    def _validate_census_variables(self, variables: List[str]) -> Dict[str, Any]:
+        """
+        Validate Census variable IDs - NO semantic resolution here
+        
+        This function only validates format - semantic resolution should happen upstream
+        """
+        
+        valid_variables = []
+        invalid_variables = []
         
         for var in variables:
-            # Check if already a Census ID (B19013_001E format)
-            if self._is_census_variable_id(var):
-                resolved.append(var)
-                continue
-            
-            # Check core mappings first (fastest path)
-            var_lower = var.lower().replace(' ', '_')
-            if var_lower in self.core_mappings:
-                resolved.append(self.core_mappings[var_lower])
-                continue
-            
-            # TODO: Integrate with semantic search (kb_search.py)
-            # For now, log unmapped variables
-            logger.warning(f"⚠️ Could not resolve variable: {var}")
+            if self._is_valid_census_variable_id(var):
+                valid_variables.append(var.upper().strip())
+            else:
+                invalid_variables.append(var)
         
-        return resolved
+        return {
+            'valid_variables': valid_variables,
+            'invalid_variables': invalid_variables,
+            'validation_method': 'format_check_only',
+            'note': 'Semantic variable resolution should happen before calling this function'
+        }
     
-    def _is_census_variable_id(self, var: str) -> bool:
-        """Check if string is already a Census variable ID"""
+    def _is_valid_census_variable_id(self, var: str) -> bool:
+        """Check if variable is a proper Census variable ID format"""
         import re
-        pattern = r'^[A-Z]\d{5}_\d{3}[E|M]?$'
-        return bool(re.match(pattern, var.upper()))
+        # Match pattern like B01003_001E or B01003_001M
+        pattern = r'^[A-Z]\d{5}_\d{3}[EM]?$'
+        return bool(re.match(pattern, var.upper().strip()))
     
-    async def _fetch_census_data(self, variables: List[str], location_info: Dict,
-                                year: int, survey: str) -> Dict[str, Any]:
-        """
-        Fetch data from Census API with robust error handling
-        """
+    async def _execute_census_api_call(self, variables: List[str], location_info: Dict,
+                                     year: int, survey: str) -> Dict[str, Any]:
+        """Execute Census API call with validated geography and variables"""
+        
         try:
             # Build API URL
             url = f"{self.base_url}/{year}/acs/{survey}"
             
-            # Build geography parameters (now returns dict, not string)
-            geography_params = self._build_geography_string(location_info)
+            # Build geography parameters from FIPS codes
+            geography_params = self._build_geography_parameters(location_info)
             if not geography_params:
-                return {'error': f"Could not build geography for {location_info}"}
+                return {
+                    'error': 'Could not build geography parameters from FIPS codes',
+                    'location_info': location_info
+                }
             
             # Build request parameters
             params = {
                 'get': ','.join(variables + ['NAME'])
             }
-            
-            # Add geography parameters (separate 'for' and 'in' keys)
             params.update(geography_params)
             
-            # Add API key if available
             if self.api_key:
                 params['key'] = self.api_key
             
-            logger.info(f"🌐 Census API call: {url} with {len(variables)} variables")
+            logger.info(f"🌐 Census API: {url}")
             logger.debug(f"Parameters: {params}")
             
-            # Make request with timeout and error handling
+            # Execute request
             response = requests.get(url, params=params, timeout=30)
             
-            # Check HTTP status
             if response.status_code != 200:
-                error_msg = f"Census API HTTP {response.status_code}"
-                if response.text:
-                    error_msg += f": {response.text[:200]}"
-                return {'error': error_msg}
-            
-            # Check for empty response (FIXES JSON parsing error)
-            if not response.text or not response.text.strip():
                 return {
-                    'error': 'Empty response from Census API',
-                    'suggestion': 'The requested data may not be available for this geography/year combination'
+                    'error': f"Census API HTTP {response.status_code}",
+                    'response_text': response.text[:500],
+                    'url': url,
+                    'parameters': params
                 }
             
-            # Parse JSON with error handling
+            if not response.text.strip():
+                return {
+                    'error': 'Empty response from Census API',
+                    'url': url,
+                    'parameters': params
+                }
+            
+            # Parse response
             try:
                 data = response.json()
             except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error. Response text: {response.text[:500]}")
                 return {
-                    'error': f'Invalid JSON response from Census API',
-                    'details': str(e),
-                    'suggestion': 'The Census API may be experiencing issues'
+                    'error': f'Invalid JSON from Census API: {str(e)}',
+                    'response_preview': response.text[:300]
                 }
             
-            # Validate data structure
             if not data or not isinstance(data, list) or len(data) < 2:
                 return {
-                    'error': 'No data returned from Census API',
-                    'suggestion': 'Try a different geography level or check if data is available for this year'
+                    'error': 'No data rows returned from Census API',
+                    'response': data
                 }
             
-            logger.info(f"✅ Census API success: {len(data)-1} rows returned")
             return self._parse_census_response(data, variables)
             
         except requests.exceptions.Timeout:
-            return {'error': 'Census API request timed out (30 seconds)'}
+            return {'error': 'Census API timeout (30 seconds)'}
         except requests.exceptions.ConnectionError:
-            return {'error': 'Could not connect to Census API'}
-        except requests.exceptions.RequestException as e:
-            return {'error': f'Census API request failed: {str(e)}'}
+            return {'error': 'Cannot connect to Census API'}
         except Exception as e:
-            logger.error(f"Unexpected error in Census API call: {e}")
-            return {'error': f'Unexpected error: {str(e)}'}
+            return {'error': f'Census API system error: {str(e)}'}
     
-    def _build_geography_string(self, location_info: Dict) -> Optional[Dict[str, str]]:
-        """Build Census API geography parameters as separate dict entries"""
-        geography = location_info.get('geography')
+    def _build_geography_parameters(self, location_info: Dict) -> Optional[Dict[str, str]]:
+        """Build Census API geography parameters from FIPS codes"""
         
-        if geography == 'us':
+        geography_type = location_info.get('geography_type')
+        
+        if geography_type == 'us':
             return {'for': 'us:*'}
-        elif geography == 'state':
+        
+        elif geography_type == 'state':
             state_fips = location_info.get('state_fips')
-            if state_fips:
-                return {'for': f'state:{state_fips}'}
-        elif geography == 'place':
+            if not state_fips:
+                logger.error("Missing state FIPS code for state-level query")
+                return None
+            return {'for': f'state:{state_fips}'}
+        
+        elif geography_type == 'place':
             state_fips = location_info.get('state_fips')
             place_fips = location_info.get('place_fips')
-            if state_fips and place_fips:
-                return {
-                    'for': f'place:{place_fips}',
-                    'in': f'state:{state_fips}'
-                }
-        elif geography == 'county':
+            if not state_fips or not place_fips:
+                logger.error(f"Missing FIPS codes for place query - state: {state_fips}, place: {place_fips}")
+                return None
+            return {
+                'for': f'place:{place_fips}',
+                'in': f'state:{state_fips}'
+            }
+        
+        elif geography_type == 'county':
             state_fips = location_info.get('state_fips')
             county_fips = location_info.get('county_fips')
-            if state_fips and county_fips:
-                return {
-                    'for': f'county:{county_fips}',
-                    'in': f'state:{state_fips}'
-                }
-        else:
-            logger.error(f"Unknown geography type: {geography}")
+            if not state_fips or not county_fips:
+                logger.error(f"Missing FIPS codes for county query - state: {state_fips}, county: {county_fips}")
+                return None
+            return {
+                'for': f'county:{county_fips}',
+                'in': f'state:{state_fips}'
+            }
         
-        return None
+        elif geography_type == 'zcta':
+            zcta_code = location_info.get('zcta_code')
+            if not zcta_code:
+                logger.error("Missing ZCTA code for ZIP code query")
+                return None
+            return {'for': f'zip code tabulation area:{zcta_code}'}
+        
+        else:
+            logger.error(f"Unsupported geography type: {geography_type}")
+            return None
     
     def _parse_census_response(self, data: List[List], variables: List[str]) -> Dict[str, Any]:
-        """Parse Census API JSON response into structured data"""
-        if not data or len(data) < 2:
-            return {'error': 'Invalid data structure from Census API'}
+        """Parse Census API response"""
         
         headers = data[0]
         rows = data[1:]
         
         result = {'data': {}}
         
-        # Process each row (usually just one for specific geographies)
         for row in rows:
             if len(row) != len(headers):
-                logger.warning(f"Row length mismatch: {len(row)} vs {len(headers)}")
                 continue
             
             row_data = dict(zip(headers, row))
+            result['name'] = row_data.get('NAME', 'Unknown')
             
-            # Extract geographic name
-            result['name'] = row_data.get('NAME', 'Unknown Location')
-            
-            # Extract each variable
             for var in variables:
                 if var in row_data:
                     value = row_data[var]
-                    
-                    # Handle null/missing values
-                    if value is None or value == 'null' or value == '' or value == '-':
-                        result['data'][var] = {
-                            'estimate': None,
-                            'error': 'Data not available'
-                        }
+                    if value in [None, 'null', '', '-']:
+                        result['data'][var] = {'estimate': None, 'error': 'No data'}
                     else:
                         try:
-                            # Convert to number
                             numeric_value = float(value)
-                            
-                            # Format based on likely data type
-                            if var.endswith('_001E') and 'income' in var.lower():
-                                # Income variables - format as currency
-                                formatted = f"${numeric_value:,.0f}"
-                            elif numeric_value >= 1000:
-                                # Large numbers - add commas
-                                formatted = f"{numeric_value:,.0f}"
-                            else:
-                                # Small numbers or rates
-                                formatted = f"{numeric_value:g}"
-                            
                             result['data'][var] = {
                                 'estimate': numeric_value,
-                                'formatted': formatted
+                                'formatted': f"{numeric_value:,.0f}" if numeric_value >= 1000 else f"{numeric_value:g}"
                             }
-                            
                         except (ValueError, TypeError):
-                            # Non-numeric value
-                            result['data'][var] = {
-                                'estimate': value,
-                                'formatted': str(value)
-                            }
+                            result['data'][var] = {'estimate': value, 'formatted': str(value)}
         
         return result
     
-    def _format_response(self, census_data: Dict, location: str, location_info: Dict,
-                        variables: List[str], resolved_variables: List[str],
-                        year: int, survey: str) -> Dict[str, Any]:
-        """Format final response with metadata"""
+    def _format_geography_first_response(self, original_location: str, original_variables: List[str],
+                                       location_result: Dict, variable_result: Dict,
+                                       census_data: Dict, year: int, survey: str) -> Dict[str, Any]:
+        """Format response emphasizing geography-first workflow"""
         
         return {
-            'location': location,
+            'location': original_location,
             'resolved_location': {
-                'name': census_data.get('name', location),
-                'geography_type': location_info.get('geography', 'unknown'),
-                'resolution_method': location_info.get('resolution_method', 'unknown'),
+                'name': location_result['resolved_name'],
+                'geography_type': location_result['geography_type'],
+                'resolution_method': location_result['resolution_method'],
                 'fips_codes': {
-                    'state': location_info.get('state_fips'),
-                    'place': location_info.get('place_fips'),
-                    'county': location_info.get('county_fips')
+                    'state': location_result.get('state_fips'),
+                    'place': location_result.get('place_fips'),
+                    'county': location_result.get('county_fips'),
+                    'cbsa': location_result.get('cbsa_code'),
+                    'zcta': location_result.get('zcta_code')
                 }
             },
             'data': census_data.get('data', {}),
             'variables': {
-                'requested': variables,
-                'resolved': resolved_variables,
-                'success_count': len([v for v in resolved_variables if v in census_data.get('data', {})])
+                'requested': original_variables,
+                'validated': variable_result['valid_variables'],
+                'invalid': variable_result['invalid_variables'],
+                'success_count': len([v for v in variable_result['valid_variables']
+                                    if v in census_data.get('data', {})
+                                    and census_data['data'][v].get('estimate') is not None])
             },
             'survey_info': {
                 'year': year,
                 'survey': survey.upper(),
                 'source': 'US Census Bureau American Community Survey'
             },
-            'api_info': {
-                'version': 'python_census_api_v2.9_mcp_clean',
-                'geographic_resolution': 'Production DB' if self.geo_handler else 'Basic fallback',
-                'environment_loaded': bool(self.api_key)
+            'workflow_info': {
+                'version': 'python_census_api_v2.10_geography_first',
+                'architecture': 'geography_first',
+                'steps_completed': ['geographic_resolution', 'variable_validation', 'census_api_call', 'response_formatting'],
+                'geographic_foundation': True,
+                'no_bandaid_fixes': True
             }
         }
 
-# Test function for validation (only runs when called directly, not during MCP import)
-async def test_with_fallback():
-    """Test the fixed API with fallback capabilities"""
-    api = PythonCensusAPI()
+# Test function for geography-first workflow
+async def test_geography_first():
+    """Test geography-first workflow - geography is the foundation"""
     
+    logger.info("🧪 Testing geography-first workflow")
+    
+    try:
+        api = PythonCensusAPI()
+        logger.info("✅ Geography-first API initialized")
+    except Exception as e:
+        logger.error(f"❌ CRITICAL: Cannot initialize geography-first API: {e}")
+        return
+    
+    # Test cases prioritizing geographic resolution
     test_cases = [
-        ("Minnesota", ["population"]),           # Should work with basic fallback
-        ("United States", ["population"]),      # Should work
-        ("Texas", ["median_household_income"]), # Should work with basic fallback
+        # Basic geographic tests
+        ("United States", ["B01003_001E"]),     # National level (no FIPS needed)
+        ("New York", ["B01003_001E"]),          # State resolution (requires gazetteer)
+        ("Austin, TX", ["B01003_001E"]),        # Place resolution (requires gazetteer)
+        
+        # Geography failure scenarios
+        ("Mars Colony", ["B01003_001E"]),       # Should fail at geography step
+        ("United States", ["invalid_var"]),     # Should fail at variable step
     ]
     
     for location, variables in test_cases:
-        logger.info(f"\n🧪 Testing: {location} with {variables}")  # ← FIXED: print → logger.info
+        logger.info(f"\n🌍 Testing geography-first: '{location}' with {variables}")
+        
         try:
             result = await api.get_demographic_data(location, variables)
+            
             if 'error' in result:
-                logger.error(f"❌ Error: {result['error']}")  # ← FIXED: print → logger.error
-                if 'suggestion' in result:
-                    logger.info(f"💡 Suggestion: {result['suggestion']}")  # ← FIXED: print → logger.info
+                step_failed = result.get('step_failed', 'unknown')
+                logger.warning(f"⚠️ Failed at step: {step_failed}")
+                logger.warning(f"   Error: {result['error']}")
+                
+                if 'location_resolved' in result:
+                    logger.info(f"   ✅ Geography resolved: {result['location_resolved']}")
+                if 'variables_validated' in result:
+                    logger.info(f"   ✅ Variables validated: {result['variables_validated']}")
             else:
-                logger.info(f"✅ Success: {result['resolved_location']['name']}")  # ← FIXED: print → logger.info
-                logger.info(f"   Method: {result['resolved_location']['resolution_method']}")  # ← FIXED: print → logger.info
-                for var, data in result['data'].items():
-                    logger.info(f"   {var}: {data.get('formatted', data.get('estimate'))}")  # ← FIXED: print → logger.info
+                logger.info(f"✅ Complete success: {result['resolved_location']['name']}")
+                logger.info(f"   Geography: {result['resolved_location']['resolution_method']}")
+                logger.info(f"   Variables: {len(result['variables']['validated'])} validated")
+                
         except Exception as e:
-            logger.error(f"❌ Exception: {e}")  # ← FIXED: print → logger.error
+            logger.error(f"❌ System error: {e}")
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(test_with_fallback())
+    asyncio.run(test_geography_first())
