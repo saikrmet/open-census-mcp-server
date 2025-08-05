@@ -714,6 +714,7 @@ class OpenAIKnowledgeBuilder:
             label = concept_data.get('label', '')
             summary = concept_data.get('summary', '')
             key_terms = concept_data.get('key_terms', [])
+            enrichment_text = concept_data.get('enrichment_text', '')
             
             parts = []
             
@@ -724,11 +725,11 @@ class OpenAIKnowledgeBuilder:
                 parts.append(label)
             
             if summary:
-                # NO ARBITRARY TRUNCATION - use full summary
+                # Use full summary - no truncation
                 parts.append(summary)
             
             if key_terms and isinstance(key_terms, list):
-                # NO ARBITRARY TRUNCATION - use all key terms
+                # Use all key terms - no truncation
                 terms_text = ', '.join(key_terms)
                 parts.append(f"Key terms: {terms_text}")
             
@@ -743,16 +744,36 @@ class OpenAIKnowledgeBuilder:
                 
                 self.variables_stats['survey_instances_processed'] += len(instances)
             
+            # Complete metadata with ALL fields from JSON
             metadata = {
                 'variable_id': variable_id,
-                'concept_name': concept_name,
-                'description': label,
+                'concept': concept_name,
+                'label': label,
                 'summary': summary,
                 'key_terms': ', '.join(key_terms) if isinstance(key_terms, list) else str(key_terms),
+                'enrichment_text': enrichment_text,
+                'category_weights_linear': concept_data.get('category_weights_linear', {}),
+                'complexity': concept_data.get('complexity', ''),
+                'available_surveys': concept_data.get('available_surveys', []),
+                'available_years': concept_data.get('available_years', []),
+                'geography_coverage': concept_data.get('geography_coverage', {}),
+                'primary_instance': concept_data.get('primary_instance', ''),
+                'group': concept_data.get('group', ''),
+                'table_id': concept_data.get('table_id', ''),
+                'table_family': concept_data.get('table_family', ''),
+                'predicate_type': concept_data.get('predicate_type', ''),
+                'version': concept_data.get('version', 1),
+                'valid_from': concept_data.get('valid_from', ''),
+                'valid_to': concept_data.get('valid_to', ''),
+                'replaces': concept_data.get('replaces', None),
+                'replaced_by': concept_data.get('replaced_by', None),
+                'related_variables': concept_data.get('related_variables', None),
+                'comparability_notes': concept_data.get('comparability_notes', None),
                 'survey_instances_count': len(instances) if isinstance(instances, list) else 0,
                 'structure_type': 'concept_based'
             }
         else:
+            # Legacy temporal structure handling
             label = concept_data.get('label', variable_id)
             description = concept_data.get('description', '')
             
@@ -762,8 +783,10 @@ class OpenAIKnowledgeBuilder:
             
             metadata = {
                 'variable_id': variable_id,
+                'concept': label,
                 'label': label,
-                'description': description,
+                'summary': description,
+                'key_terms': '',
                 'structure_type': 'temporal_based'
             }
             
