@@ -1,696 +1,270 @@
 #!/usr/bin/env python3
 """
-Complete Geographic Handler - Fixed for Actual Database Schema
-Supports ALL Census geography levels with spatial analysis capabilities
+Geographic Handler - FIXED - Simple and Effective Search
 
-SCHEMA FIXES:
-- Removed funcstat filtering (column doesn't exist)
-- Fixed cbsa_type mapping ('1'=Metro, '2'=Micro)
-- Fixed county adjacency column names
-- Handles actual database structure
-
-COMPLETE COVERAGE:
-- 32,285 places (cities, towns, villages)  
-- 3,222 counties (parishes, boroughs)
-- 935 CBSAs (metro/micro statistical areas)
-- 33,791 ZCTAs (ZIP Code Tabulation Areas)
-- County adjacency for spatial queries
-- Hot cache for instant lookups
+Key fix: Use LOWER(name) instead of non-existent name_lower column
+Simplified search logic: find everything that matches, let Claude decide
 """
 
 import sqlite3
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, List, Optional, Any
 import re
-import json
 
 logger = logging.getLogger(__name__)
 
-class CompleteGeographicHandler:
-    """Complete geographic resolution with full gazetteer dataset"""
+class GeographicHandler:
+    """
+    Database-driven geographic resolution with FIXED search patterns.
+    """
     
-    def __init__(self, db_path: Optional[Path] = None):
-        if db_path is None:
-            # Auto-detect geography database - check correct path
-            current_dir = Path(__file__).parent
-            project_root = current_dir.parent.parent
-            
-            # Check both possible locations
-            possible_paths = [
-                project_root / "knowledge-base" / "geo-db" / "geography.db",
-                project_root / "knowledge-base" / "geography.db"
-            ]
-            
-            for path in possible_paths:
-                if path.exists():
-                    db_path = path
-                    break
+    def __init__(self, geography_db_path: str):
+        """Initialize with path to geography database."""
+        self.db_path = Path(geography_db_path)
         
-        self.db_path = Path(db_path) if db_path else None
-        self.conn = None
-        self.hot_cache = {}
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"Geography database not found: {self.db_path}")
         
-        # Initialize database and validate completeness
-        self._init_complete_database()
-        self._load_hot_cache()
-        self._validate_geographic_coverage()
-    
-    def _init_complete_database(self):
-        """Initialize complete geographic database with all tables"""
-        try:
-            if not self.db_path or not self.db_path.exists():
-                raise FileNotFoundError(f"Complete geography database not found: {self.db_path}")
-            
-            self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
-            
-            # Verify all required tables exist
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = {row[0] for row in cursor.fetchall()}
-            
-            required_tables = {
-                'places', 'counties', 'states', 'cbsas', 'zctas', 'county_adjacency', 'name_variations'
-            }
-            
-            missing_tables = required_tables - tables
-            if missing_tables:
-                raise ValueError(f"Database missing required tables: {missing_tables}")
-            
-            logger.info(f"✅ Complete geographic database connected: {self.db_path}")
-            logger.info(f"✅ All {len(required_tables)} required tables present")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize complete geographic database: {e}")
-            raise
-    
-    def _validate_geographic_coverage(self):
-        """Validate completeness of geographic coverage"""
-        try:
-            cursor = self.conn.cursor()
-            coverage = {}
-            
-            cursor.execute("SELECT COUNT(*) FROM places")
-            coverage['places'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM counties")
-            coverage['counties'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM states")
-            coverage['states'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM cbsas")
-            coverage['cbsas'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM zctas")
-            coverage['zctas'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM county_adjacency")
-            coverage['adjacencies'] = cursor.fetchone()[0]
-            
-            logger.info("🌍 Complete Geographic Coverage:")
-            logger.info(f"   Places: {coverage['places']:,}")
-            logger.info(f"   Counties: {coverage['counties']:,}")
-            logger.info(f"   States: {coverage['states']:,}")
-            logger.info(f"   CBSAs: {coverage['cbsas']:,}")
-            logger.info(f"   ZCTAs: {coverage['zctas']:,}")
-            logger.info(f"   County adjacencies: {coverage['adjacencies']:,}")
-            
-            self.coverage_stats = coverage
-            
-        except Exception as e:
-            logger.error(f"❌ Geographic coverage validation failed: {e}")
-            self.coverage_stats = {}
-    
-    def _load_hot_cache(self):
-        """Load frequently accessed locations into hot cache - FIXED for actual schema"""
-        if not self.conn:
-            return
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
         
-        try:
-            cursor = self.conn.cursor()
-            
-            # Load major metropolitan areas - FIXED: Use '1' for Metropolitan
-            cursor.execute("""
-                SELECT cbsa_code, name, cbsa_type, name_lower
-                FROM cbsas 
-                WHERE cbsa_type = '1'
-                ORDER BY CAST(COALESCE(land_area, 0) AS REAL) DESC
-                LIMIT 100
-            """)
-            
-            for row in cursor.fetchall():
-                cache_key = f"cbsa:{row['name_lower']}"
-                self.hot_cache[cache_key] = {
-                    'geography_type': 'cbsa',
-                    'cbsa_code': row['cbsa_code'],
-                    'name': row['name'],
-                    'cbsa_type': 'Metropolitan Statistical Area',
-                    'resolution_method': 'hot_cache_cbsa'
-                }
-            
-            # Load major cities - FIXED: Removed funcstat filter
-            cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name, name_lower, population
+        logger.info(f"✅ GeographicHandler initialized with {self.db_path}")
+    
+    def search_locations(self, location: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Simple, effective search: find everything that matches, let Claude decide.
+        """
+        if not location or not location.strip():
+            return []
+        
+        location = location.strip()
+        logger.info(f"🔍 Searching for: '{location}'")
+        
+        results = []
+        
+        # Extract state context (e.g. "St. Louis, MO" -> state = "MO")
+        state_filter = None
+        if ',' in location:
+            parts = location.split(',')
+            if len(parts) == 2:
+                main_location = parts[0].strip()
+                potential_state = parts[1].strip().upper()
+                if len(potential_state) == 2:
+                    state_filter = potential_state
+                    location = main_location
+        
+        # Search places
+        results.extend(self._search_places(location, state_filter, max_results // 2))
+        
+        # Search counties
+        results.extend(self._search_counties(location, state_filter, max_results // 2))
+        
+        # Search CBSAs
+        results.extend(self._search_cbsas(location, max_results // 4))
+        
+        # Search ZCTAs if it looks like a ZIP
+        if self._is_zip_code(location):
+            results.extend(self._search_zctas(location, max_results // 4))
+        
+        # Remove duplicates and sort by confidence
+        unique_results = self._deduplicate_results(results)
+        sorted_results = sorted(unique_results, key=lambda x: x['confidence'], reverse=True)
+        
+        logger.info(f"✅ Found {len(sorted_results)} matches for '{location}'")
+        return sorted_results[:max_results]
+    
+    def _search_places(self, name: str, state_filter: Optional[str], limit: int) -> List[Dict[str, Any]]:
+        """Search places with simple LIKE matching."""
+        cursor = self.conn.cursor()
+        
+        if state_filter:
+            query = """
+                SELECT 'place' as geography_type, name, state_abbrev, state_fips, place_fips
                 FROM places 
-                WHERE population IS NOT NULL
-                ORDER BY CAST(COALESCE(population, 0) AS INTEGER) DESC
-                LIMIT 500
-            """)
-            
-            for row in cursor.fetchall():
-                cache_key = f"place:{row['name_lower']},{row['state_abbrev'].lower()}"
-                self.hot_cache[cache_key] = {
-                    'geography_type': 'place',
-                    'place_fips': row['place_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name'],
-                    'population': row['population'],
-                    'resolution_method': 'hot_cache_place'
-                }
-            
-            # Load all states
-            cursor.execute("SELECT state_fips, state_abbrev, state_name FROM states")
-            for row in cursor.fetchall():
-                # Cache by full name
-                cache_key = f"state:{row['state_name'].lower()}"
-                self.hot_cache[cache_key] = {
-                    'geography_type': 'state',
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['state_name'],
-                    'resolution_method': 'hot_cache_state'
-                }
-                
-                # Cache by abbreviation
-                cache_key = f"state:{row['state_abbrev'].lower()}"
-                self.hot_cache[cache_key] = {
-                    'geography_type': 'state',
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['state_name'],
-                    'resolution_method': 'hot_cache_state_abbrev'
-                }
-            
-            logger.info(f"✅ Hot cache loaded: {len(self.hot_cache)} locations")
-            
-        except Exception as e:
-            logger.warning(f"Failed to load hot cache: {e}")
-            self.hot_cache = {}
-    
-    def resolve_location(self, location_string: str) -> Dict[str, Any]:
-        """Complete location resolution supporting all Census geography levels"""
-        
-        location = location_string.strip()
-        
-        # Handle national level
-        if location.lower() in ['united states', 'usa', 'us', 'america', 'national', 'nationwide']:
-            return {
-                'geography_type': 'us',
-                'state_fips': None,
-                'place_fips': None,
-                'county_fips': None,
-                'cbsa_code': None,
-                'zcta_code': None,
-                'name': 'United States',
-                'resolution_method': 'national_keyword'
-            }
-        
-        # Multi-strategy resolution
-        strategies = [
-            self._hot_cache_lookup,
-            self._zcta_lookup,
-            self._cbsa_pattern_lookup,
-            self._place_state_lookup,
-            self._county_lookup,
-            self._state_lookup,
-            self._fuzzy_place_lookup,
-            self._spatial_query_lookup
-        ]
-        
-        for strategy in strategies:
-            try:
-                result = strategy(location)
-                if result and 'error' not in result:
-                    return result
-            except Exception as e:
-                logger.warning(f"Strategy {strategy.__name__} failed for '{location}': {e}")
-                continue
-        
-        return self._fail_with_comprehensive_suggestions(location)
-    
-    def _hot_cache_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """Instant lookup from hot cache"""
-        location_lower = location.lower()
-        
-        cache_keys = [
-            f"place:{location_lower}",
-            f"state:{location_lower}",
-            f"cbsa:{location_lower}"
-        ]
-        
-        for cache_key in cache_keys:
-            if cache_key in self.hot_cache:
-                return self.hot_cache[cache_key]
-        
-        return None
-    
-    def _zcta_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """ZIP Code Tabulation Area lookup"""
-        
-        zip_patterns = [
-            r'\b(\d{5})\b',
-            r'zip\s*code?\s*(\d{5})',
-            r'postal\s*code\s*(\d{5})',
-            r'zcta\s*(\d{5})'
-        ]
-        
-        for pattern in zip_patterns:
-            match = re.search(pattern, location, re.IGNORECASE)
-            if match:
-                zcta_code = match.group(1)
-                
-                try:
-                    cursor = self.conn.cursor()
-                    cursor.execute("""
-                        SELECT zcta_code, lat, lon
-                        FROM zctas 
-                        WHERE zcta_code = ?
-                    """, (zcta_code,))
-                    
-                    row = cursor.fetchone()
-                    if row:
-                        return {
-                            'geography_type': 'zcta',
-                            'zcta_code': row['zcta_code'],
-                            'state_fips': None,
-                            'name': f"ZIP Code {row['zcta_code']}",
-                            'lat': row['lat'],
-                            'lon': row['lon'],
-                            'resolution_method': 'zcta_pattern_match'
-                        }
-                except Exception as e:
-                    logger.warning(f"ZCTA lookup failed for {zcta_code}: {e}")
-        
-        return None
-    
-    def _cbsa_pattern_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """Metropolitan/micropolitan statistical area lookup - FIXED"""
-        
-        metro_patterns = [
-            r'(.+?)\s+metro(?:\s+area)?',
-            r'greater\s+(.+?)(?:\s|$)',
-            r'(.+?)\s+bay\s+area',
-            r'(.+?)\s+metropolitan\s+area',
-            r'(.+?)\s+msa',
-            r'(.+?)\s+region'
-        ]
-        
-        for pattern in metro_patterns:
-            match = re.search(pattern, location, re.IGNORECASE)
-            if match:
-                metro_name = match.group(1).strip()
-                
-                try:
-                    cursor = self.conn.cursor()
-                    cursor.execute("""
-                        SELECT cbsa_code, name, cbsa_type, lat, lon
-                        FROM cbsas 
-                        WHERE name_lower LIKE ? OR name_lower LIKE ?
-                        ORDER BY 
-                            CASE WHEN cbsa_type = '1' THEN 0 ELSE 1 END,
-                            LENGTH(name)
-                        LIMIT 1
-                    """, (f"%{metro_name.lower()}%", f"{metro_name.lower()}%"))
-                    
-                    row = cursor.fetchone()
-                    if row:
-                        readable_type = 'Metropolitan Statistical Area' if row['cbsa_type'] == '1' else 'Micropolitan Statistical Area'
-                        
-                        return {
-                            'geography_type': 'cbsa',
-                            'cbsa_code': row['cbsa_code'],
-                            'name': row['name'],
-                            'cbsa_type': readable_type,
-                            'lat': row['lat'],
-                            'lon': row['lon'],
-                            'resolution_method': 'cbsa_pattern_match'
-                        }
-                except Exception as e:
-                    logger.warning(f"CBSA lookup failed for {metro_name}: {e}")
-        
-        return None
-    
-    def _place_state_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """City, State format lookup - FIXED to remove funcstat"""
-        
-        place_state_pattern = r'^(.+?),\s*([A-Z]{2})$'
-        match = re.match(place_state_pattern, location.strip())
-        
-        if not match:
-            return None
-        
-        place_name = match.group(1).strip()
-        state_abbrev = match.group(2).upper()
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            # Exact match - REMOVED funcstat filter
-            cursor.execute("""
-                SELECT place_fips, state_fips, state_abbrev, name, 
-                       population, lat, lon
-                FROM places 
-                WHERE name_lower = ? AND state_abbrev = ?
-                ORDER BY CAST(COALESCE(population, 0) AS INTEGER) DESC
-                LIMIT 1
-            """, (place_name.lower(), state_abbrev))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'geography_type': 'place',
-                    'place_fips': row['place_fips'],
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['name'],
-                    'population': row['population'],
-                    'lat': row['lat'],
-                    'lon': row['lon'],
-                    'resolution_method': 'place_exact_match'
-                }
-        
-        except Exception as e:
-            logger.warning(f"Place lookup failed for {place_name}, {state_abbrev}: {e}")
-        
-        return None
-    
-    def _county_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """County lookup with various naming patterns"""
-        
-        county_patterns = [
-            r'^(.+?)\s+county(?:\s*,\s*([A-Z]{2}))?$',
-            r'^(.+?)\s+parish(?:\s*,\s*([A-Z]{2}))?$',
-            r'^(.+?)\s+borough(?:\s*,\s*([A-Z]{2}))?$'
-        ]
-        
-        for pattern in county_patterns:
-            match = re.match(pattern, location.strip(), re.IGNORECASE)
-            if match:
-                county_name = match.group(1).strip()
-                state_abbrev = match.group(2)
-                
-                try:
-                    cursor = self.conn.cursor()
-                    
-                    if state_abbrev:
-                        cursor.execute("""
-                            SELECT county_fips, state_fips, state_abbrev, name, lat, lon
-                            FROM counties 
-                            WHERE name_lower LIKE ? AND state_abbrev = ?
-                            ORDER BY LENGTH(name)
-                            LIMIT 1
-                        """, (f"%{county_name.lower()}%", state_abbrev.upper()))
-                    else:
-                        cursor.execute("""
-                            SELECT county_fips, state_fips, state_abbrev, name, lat, lon
-                            FROM counties 
-                            WHERE name_lower LIKE ?
-                            ORDER BY LENGTH(name)
-                            LIMIT 1
-                        """, (f"%{county_name.lower()}%",))
-                    
-                    row = cursor.fetchone()
-                    if row:
-                        return {
-                            'geography_type': 'county',
-                            'county_fips': row['county_fips'],
-                            'state_fips': row['state_fips'],
-                            'state_abbrev': row['state_abbrev'],
-                            'name': row['name'],
-                            'lat': row['lat'],
-                            'lon': row['lon'],
-                            'resolution_method': 'county_pattern_match'
-                        }
-                
-                except Exception as e:
-                    logger.warning(f"County lookup failed for {county_name}: {e}")
-        
-        return None
-    
-    def _state_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """State lookup by name or abbreviation"""
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            if len(location) == 2 and location.isalpha():
-                cursor.execute("""
-                    SELECT state_fips, state_abbrev, state_name
-                    FROM states 
-                    WHERE state_abbrev = ?
-                """, (location.upper(),))
-            else:
-                cursor.execute("""
-                    SELECT state_fips, state_abbrev, state_name
-                    FROM states 
-                    WHERE LOWER(state_name) = ?
-                """, (location.lower(),))
-            
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'geography_type': 'state',
-                    'state_fips': row['state_fips'],
-                    'state_abbrev': row['state_abbrev'],
-                    'name': row['state_name'],
-                    'resolution_method': 'state_direct_match'
-                }
-        
-        except Exception as e:
-            logger.warning(f"State lookup failed for {location}: {e}")
-        
-        return None
-    
-    def _fuzzy_place_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """Fuzzy matching for place names - FIXED to remove funcstat"""
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            variations = self._generate_name_variations(location)
-            
-            for variation in variations:
-                cursor.execute("""
-                    SELECT place_fips, state_fips, state_abbrev, name,
-                           population, lat, lon
-                    FROM places 
-                    WHERE name_lower = ?
-                    ORDER BY CAST(COALESCE(population, 0) AS INTEGER) DESC
-                    LIMIT 1
-                """, (variation.lower(),))
-                
-                row = cursor.fetchone()
-                if row:
-                    return {
-                        'geography_type': 'place',
-                        'place_fips': row['place_fips'],
-                        'state_fips': row['state_fips'],
-                        'state_abbrev': row['state_abbrev'],
-                        'name': row['name'],
-                        'population': row['population'],
-                        'lat': row['lat'],
-                        'lon': row['lon'],
-                        'original_query': location,
-                        'matched_variation': variation,
-                        'resolution_method': 'fuzzy_place_match'
-                    }
-        
-        except Exception as e:
-            logger.warning(f"Fuzzy place lookup failed for {location}: {e}")
-        
-        return None
-    
-    def _spatial_query_lookup(self, location: str) -> Optional[Dict[str, Any]]:
-        """Handle spatial queries using county adjacency data"""
-        
-        spatial_patterns = [
-            r'(?:counties|places)\s+near\s+(.+)',
-            r'(?:in|within)\s+(.+?)\s+metro',
-            r'adjacent\s+to\s+(.+)',
-            r'surrounding\s+(.+)'
-        ]
-        
-        for pattern in spatial_patterns:
-            match = re.search(pattern, location, re.IGNORECASE)
-            if match:
-                anchor_location = match.group(1).strip()
-                
-                return {
-                    'geography_type': 'spatial',
-                    'anchor_location': anchor_location,
-                    'spatial_query': location,
-                    'resolution_method': 'spatial_query_detected',
-                    'note': 'Spatial queries require additional processing'
-                }
-        
-        return None
-    
-    def _generate_name_variations(self, location: str) -> List[str]:
-        """Generate common variations of location names"""
-        variations = [location]
-        location_lower = location.lower()
-        
-        # Saint <-> St. variations
-        if location_lower.startswith('saint '):
-            variations.append('St. ' + location[6:])
-            variations.append('St ' + location[6:])
-        elif location_lower.startswith('st. '):
-            variations.append('Saint ' + location[4:])
-        elif location_lower.startswith('st '):
-            variations.append('Saint ' + location[3:])
-            variations.append('St. ' + location[3:])
-        
-        # Remove/add periods
-        if '.' in location:
-            variations.append(location.replace('.', ''))
+                WHERE LOWER(name) LIKE LOWER(?) AND state_abbrev = ?
+                ORDER BY name
+                LIMIT ?
+            """
+            params = [f"%{name}%", state_filter, limit]
         else:
-            variations.append(location.replace(' St ', ' St. '))
-        
-        # Mount <-> Mt. variations
-        if location_lower.startswith('mount '):
-            variations.append('Mt. ' + location[6:])
-        elif location_lower.startswith('mt. '):
-            variations.append('Mount ' + location[4:])
-        
-        return list(set(variations))
-    
-    def _fail_with_comprehensive_suggestions(self, location: str) -> Dict[str, Any]:
-        """Generate comprehensive suggestions when all resolution strategies fail"""
-        
-        suggestions = []
-        
-        try:
-            cursor = self.conn.cursor()
-            search_term = f"%{location.lower()}%"
-            
-            # Places
-            cursor.execute("""
-                SELECT 'place' as type, name || ', ' || state_abbrev as suggestion
+            query = """
+                SELECT 'place' as geography_type, name, state_abbrev, state_fips, place_fips
                 FROM places 
-                WHERE name_lower LIKE ?
-                ORDER BY CAST(COALESCE(population, 0) AS INTEGER) DESC
-                LIMIT 3
-            """, (search_term,))
-            suggestions.extend([row['suggestion'] for row in cursor.fetchall()])
-            
-            # States
-            cursor.execute("""
-                SELECT 'state' as type, state_name as suggestion
-                FROM states 
-                WHERE LOWER(state_name) LIKE ?
-                LIMIT 2
-            """, (search_term,))
-            suggestions.extend([row['suggestion'] for row in cursor.fetchall()])
-            
-            # Counties
-            cursor.execute("""
-                SELECT 'county' as type, name || ', ' || state_abbrev as suggestion
-                FROM counties 
-                WHERE name_lower LIKE ?
-                ORDER BY LENGTH(name)
-                LIMIT 2
-            """, (search_term,))
-            suggestions.extend([row['suggestion'] for row in cursor.fetchall()])
-            
-            # CBSAs
-            cursor.execute("""
-                SELECT 'cbsa' as type, name as suggestion
-                FROM cbsas 
-                WHERE name_lower LIKE ?
-                ORDER BY CASE WHEN cbsa_type = '1' THEN 0 ELSE 1 END
-                LIMIT 2
-            """, (search_term,))
-            suggestions.extend([row['suggestion'] for row in cursor.fetchall()])
-            
-        except Exception as e:
-            logger.warning(f"Error generating suggestions: {e}")
+                WHERE LOWER(name) LIKE LOWER(?)
+                ORDER BY name
+                LIMIT ?
+            """
+            params = [f"%{name}%", limit]
         
-        return {
-            'error': f"Could not resolve location: {location}",
-            'resolution_method': 'comprehensive_failure',
-            'suggestions': suggestions[:8],
-            'help': {
-                'formats': [
-                    "City, ST (Austin, TX)",
-                    "State name (California)",
-                    "County name (Cook County, IL)",
-                    "ZIP code (90210)",
-                    "Metro area (San Francisco Bay Area)"
-                ],
-                'coverage': f"Database contains {self.coverage_stats.get('places', 0):,} places, "
-                          f"{self.coverage_stats.get('counties', 0):,} counties, "
-                          f"{self.coverage_stats.get('cbsas', 0):,} metro areas"
-            }
-        }
+        cursor.execute(query, params)
+        results = []
+        
+        for row in cursor.fetchall():
+            confidence = self._calculate_confidence(name, row['name'])
+            # Boost confidence for state matches
+            if state_filter and row['state_abbrev'] == state_filter:
+                confidence += 0.2
+                
+            results.append({
+                'geography_type': 'place',
+                'name': row['name'],
+                'state_abbrev': row['state_abbrev'],
+                'state_fips': row['state_fips'],
+                'place_fips': row['place_fips'],
+                'confidence': min(1.0, confidence)
+            })
+        
+        return results
     
-    def get_adjacent_counties(self, county_fips: str, state_fips: str) -> List[Dict[str, Any]]:
-        """Get counties adjacent to specified county - FIXED for actual schema"""
+    def _search_counties(self, name: str, state_filter: Optional[str], limit: int) -> List[Dict[str, Any]]:
+        """Search counties with simple LIKE matching."""
+        cursor = self.conn.cursor()
         
-        if not self.conn:
+        if state_filter:
+            query = """
+                SELECT 'county' as geography_type, name, state_abbrev, state_fips, county_fips
+                FROM counties 
+                WHERE LOWER(name) LIKE LOWER(?) AND state_abbrev = ?
+                ORDER BY name
+                LIMIT ?
+            """
+            params = [f"%{name}%", state_filter, limit]
+        else:
+            query = """
+                SELECT 'county' as geography_type, name, state_abbrev, state_fips, county_fips
+                FROM counties 
+                WHERE LOWER(name) LIKE LOWER(?)
+                ORDER BY name
+                LIMIT ?
+            """
+            params = [f"%{name}%", limit]
+        
+        cursor.execute(query, params)
+        results = []
+        
+        for row in cursor.fetchall():
+            confidence = self._calculate_confidence(name, row['name'])
+            # Boost confidence for state matches
+            if state_filter and row['state_abbrev'] == state_filter:
+                confidence += 0.2
+                
+            results.append({
+                'geography_type': 'county',
+                'name': row['name'],
+                'state_abbrev': row['state_abbrev'],
+                'state_fips': row['state_fips'],
+                'county_fips': row['county_fips'],
+                'confidence': min(1.0, confidence)
+            })
+        
+        return results
+    
+    def _search_cbsas(self, name: str, limit: int) -> List[Dict[str, Any]]:
+        """Search metro/micro areas."""
+        cursor = self.conn.cursor()
+        
+        query = """
+            SELECT 'cbsa' as geography_type, name, cbsa_code
+            FROM cbsas 
+            WHERE LOWER(name) LIKE LOWER(?)
+            ORDER BY name
+            LIMIT ?
+        """
+        
+        cursor.execute(query, [f"%{name}%", limit])
+        results = []
+        
+        for row in cursor.fetchall():
+            results.append({
+                'geography_type': 'cbsa',
+                'name': row['name'],
+                'cbsa_code': row['cbsa_code'],
+                'confidence': self._calculate_confidence(name, row['name'])
+            })
+        
+        return results
+    
+    def _search_zctas(self, zip_code: str, limit: int) -> List[Dict[str, Any]]:
+        """Search ZIP Code Tabulation Areas."""
+        clean_zip = re.sub(r'[^0-9]', '', zip_code)
+        if len(clean_zip) != 5:
             return []
         
-        try:
-            cursor = self.conn.cursor()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT zcta_code FROM zctas WHERE zcta_code = ? LIMIT ?", [clean_zip, limit])
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'geography_type': 'zcta',
+                'name': f"ZIP Code {row['zcta_code']}",
+                'zcta_code': row['zcta_code'],
+                'confidence': 1.0
+            })
+        
+        return results
+    
+    def _is_zip_code(self, location: str) -> bool:
+        """Check if location looks like a ZIP code."""
+        clean_location = re.sub(r'[^0-9]', '', location)
+        return len(clean_location) == 5 and clean_location.isdigit()
+    
+    def _calculate_confidence(self, query: str, match: str) -> float:
+        """Simple confidence calculation."""
+        query_lower = query.lower().strip()
+        match_lower = match.lower().strip()
+        
+        # Exact match
+        if query_lower == match_lower:
+            return 1.0
+        
+        # Query is contained in match or vice versa
+        if query_lower in match_lower:
+            return 0.9
+        if match_lower in query_lower:
+            return 0.8
+        
+        # Partial overlap
+        query_words = set(query_lower.split())
+        match_words = set(match_lower.split())
+        
+        if query_words & match_words:  # Any word overlap
+            overlap = len(query_words & match_words)
+            total = len(query_words | match_words)
+            return 0.5 + (0.3 * overlap / total)
+        
+        return 0.3  # Minimal match
+    
+    def _deduplicate_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate results."""
+        seen = set()
+        unique_results = []
+        
+        for result in results:
+            # Create unique key
+            if result['geography_type'] == 'place':
+                key = f"place_{result['state_fips']}_{result['place_fips']}"
+            elif result['geography_type'] == 'county':
+                key = f"county_{result['state_fips']}_{result['county_fips']}"
+            elif result['geography_type'] == 'cbsa':
+                key = f"cbsa_{result['cbsa_code']}"
+            elif result['geography_type'] == 'zcta':
+                key = f"zcta_{result['zcta_code']}"
+            else:
+                key = f"{result['geography_type']}_{result['name']}"
             
-            # Build the full county GEOID (state_fips + county_fips)
-            county_geoid = f"{state_fips}{county_fips}"
-            
-            cursor.execute("""
-                SELECT DISTINCT neighbor_geoid, neighbor_name
-                FROM county_adjacency
-                WHERE county_geoid = ?
-                ORDER BY neighbor_name
-            """, (county_geoid,))
-            
-            adjacent_counties = []
-            for row in cursor.fetchall():
-                neighbor_geoid = row['neighbor_geoid']
-                if len(neighbor_geoid) == 5:
-                    neighbor_state_fips = neighbor_geoid[:2]
-                    neighbor_county_fips = neighbor_geoid[2:]
-                    
-                    # Get additional county info
-                    cursor.execute("""
-                        SELECT state_abbrev, name, lat, lon
-                        FROM counties
-                        WHERE county_fips = ? AND state_fips = ?
-                    """, (neighbor_county_fips, neighbor_state_fips))
-                    
-                    county_info = cursor.fetchone()
-                    if county_info:
-                        adjacent_counties.append({
-                            'geography_type': 'county',
-                            'county_fips': neighbor_county_fips,
-                            'state_fips': neighbor_state_fips,
-                            'state_abbrev': county_info['state_abbrev'],
-                            'name': county_info['name'],
-                            'lat': county_info['lat'],
-                            'lon': county_info['lon'],
-                            'relationship': 'adjacent'
-                        })
-            
-            return adjacent_counties
-            
-        except Exception as e:
-            logger.error(f"Error getting adjacent counties: {e}")
-            return []
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(result)
+        
+        return unique_results
     
     def close(self):
-        """Close database connection"""
+        """Close database connection."""
         if self.conn:
             self.conn.close()
-            self.conn = None
-            logger.info("✅ Geographic database connection closed")
+    
+    def __del__(self):
+        """Cleanup database connection."""
+        self.close()

@@ -1,581 +1,433 @@
 #!/usr/bin/env python3
 """
-Census Search Engine - Clean Modular Architecture
+Clean Census Search Engine - Geography-Free Variable Discovery
 
-Orchestrates semantic search using extracted components:
-- TableCatalogSearch: Coarse table retrieval  
-- VariablesSearch: Fine variable search within tables
-- MethodologySearch: Statistical expertise context
-- Geographic parsing: Location intelligence
+Pure focus on:
+- Variable search (concept → Census variable IDs)
+- Methodology RAG (statistical context)
+- Table search (Census table discovery)
 
-Clean separation of concerns with lightweight orchestration.
+NO geographic parsing - that's handled by MCP resolve_geography tool.
 """
 
 import json
-import re
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-import os
 
-# Load environment variables more robustly
+# Vector search imports
 try:
-    from dotenv import load_dotenv
-    # Try multiple .env locations
-    for env_path in [
-        Path('.env'),
-        Path(__file__).parent / '.env',
-        Path(__file__).parent.parent / '.env'
-    ]:
-        if env_path.exists():
-            load_dotenv(env_path)
-            break
+    import faiss
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+    FAISS_AVAILABLE = True
 except ImportError:
-    pass
+    FAISS_AVAILABLE = False
+    faiss = None
+    np = None
+    SentenceTransformer = None
 
-# Import modular components
-from variable_search import VariablesSearch, create_variables_search
-from geographic_parsing import (
-    create_geographic_parser,
-    create_variable_preprocessor,
-    GeographicContext
-)
-
-# Local search components (to be extracted)
-import faiss
-import chromadb
-from chromadb.config import Settings
-from openai import OpenAI
-import numpy as np
+# Methodology search imports
+try:
+    import chromadb
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    chromadb = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @dataclass
-class SearchResult:
-    """Search result with concept-based metadata"""
+class VariableResult:
+    """Variable search result with confidence score."""
     variable_id: str
-    table_id: str
-    concept: str
     label: str
+    concept: str
+    table_id: str
+    confidence: float
+    universe: Optional[str] = None
+    methodology_notes: Optional[str] = None
+
+@dataclass
+class TableResult:
+    """Table search result."""
+    table_id: str
     title: str
     universe: str
+    subject_area: str
     confidence: float
-    geographic_relevance: float
-    geographic_restrictions: Dict[str, str]
-    available_surveys: List[str]
-    statistical_notes: List[str]
-    primary_variable: bool
-    methodology_context: Optional[str] = None
-    survey_instances: List[Dict] = None
-    geography_coverage: Dict[str, List[str]] = None
-    primary_instance: Optional[str] = None
-    structure_type: Optional[str] = None
 
-class QueryTypeDetector:
-    """Detects whether query needs variables, methodology, or both"""
+class VariablesSearch:
+    """FAISS-based variable search engine."""
     
-    def __init__(self):
-        self.variable_indicators = [
-            r'B\d{5}_\d{3}[EM]?',  # B19013_001E
-            'population', 'income', 'poverty', 'unemployment', 'housing', 'education',
-            'median', 'total', 'percentage', 'count', 'number of', 'how many',
-            'by state', 'by county', 'by race', 'by age', 'by gender'
-        ]
+    def __init__(self, variables_dir: str):
+        self.variables_dir = Path(variables_dir)
+        self.model = None
+        self.index = None
+        self.metadata = None
+        self.variable_ids = None
         
-        self.methodology_indicators = [
-            'how does', 'how is', 'methodology', 'method', 'calculated', 'measured',
-            'definition', 'universe', 'sample size', 'margin of error', 'reliability',
-            'data quality', 'survey design', 'coverage', 'response rate',
-            'statistical', 'significance', 'confidence', 'weighting', 'estimation'
-        ]
-    
-    def detect_query_type(self, query: str) -> str:
-        """Determine query type for smart routing"""
-        query_lower = query.lower()
-        
-        variable_score = sum(1 for indicator in self.variable_indicators
-                           if re.search(indicator, query_lower))
-        methodology_score = sum(1 for indicator in self.methodology_indicators
-                              if indicator in query_lower)
-        
-        if variable_score > methodology_score:
-            return 'variables'
-        elif methodology_score > variable_score:
-            return 'methodology'
+        if FAISS_AVAILABLE:
+            self._load_index()
         else:
-            return 'both'
-
-class OpenAIEmbeddings:
-    """OpenAI embeddings for search components"""
+            logger.warning("FAISS not available - variable search disabled")
     
-    def __init__(self):
-        self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        self.model = "text-embedding-3-large"
-        self.dimensions = 3072
-        
-        if not os.getenv('OPENAI_API_KEY'):
-            raise ValueError("OPENAI_API_KEY required")
+    def _load_index(self):
+        """Load FAISS index and metadata."""
+        try:
+            # Load FAISS index
+            index_path = self.variables_dir / "variables.faiss"
+            if index_path.exists():
+                self.index = faiss.read_index(str(index_path))
+                logger.info(f"✅ Loaded FAISS index with {self.index.ntotal} variables")
+            
+            # Load metadata
+            metadata_path = self.variables_dir / "variables_metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path) as f:
+                    self.metadata = json.load(f)
+                logger.info(f"✅ Loaded metadata for {len(self.metadata)} variables")
+            
+            # Load variable IDs
+            ids_path = self.variables_dir / "variables_ids.json"
+            if ids_path.exists():
+                with open(ids_path) as f:
+                    data = json.load(f)
+                    self.variable_ids = data.get('variable_ids', [])
+                logger.info(f"✅ Loaded {len(self.variable_ids)} variable IDs")
+            
+            # Load sentence transformer model
+            self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            logger.info("✅ Loaded sentence transformer model")
+            
+        except Exception as e:
+            logger.error(f"Failed to load variables search: {e}")
+            self.index = None
     
-    def encode(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings for texts"""
-        if isinstance(texts, str):
-            texts = [texts]
+    def search(self, query: str, max_results: int = 10) -> List[VariableResult]:
+        """Search for variables by concept."""
+        if not self.index or not self.model:
+            logger.warning("Variables search not available")
+            return []
         
-        response = self.client.embeddings.create(input=texts, model=self.model)
-        return np.array([data.embedding for data in response.data], dtype=np.float32)
+        try:
+            # Encode query
+            query_embedding = self.model.encode([query])
+            
+            # Search FAISS index
+            scores, indices = self.index.search(query_embedding.astype('float32'), max_results)
+            
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < len(self.variable_ids):
+                    variable_id = self.variable_ids[idx]
+                    metadata = self.metadata.get(variable_id, {})
+                    
+                    result = VariableResult(
+                        variable_id=variable_id,
+                        label=metadata.get('label', variable_id),
+                        concept=metadata.get('concept', ''),
+                        table_id=variable_id.split('_')[0] if '_' in variable_id else '',
+                        confidence=float(1.0 - score),  # Convert distance to similarity
+                        universe=metadata.get('universe'),
+                    )
+                    results.append(result)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Variable search error: {e}")
+            return []
 
 class TableCatalogSearch:
-    """Coarse retrieval using table catalog with FAISS"""
+    """FAISS-based table search using existing embeddings."""
     
-    def __init__(self, catalog_dir: str = "table-catalog"):
+    def __init__(self, catalog_dir: str):
         self.catalog_dir = Path(catalog_dir)
+        self.model = None
+        self.index = None
+        self.table_ids = None
         self.tables = {}
-        self.embeddings_index = None
-        self.table_ids = []
-        self.embedding_model = OpenAIEmbeddings()
         
-        self._load_catalog()
-        self._load_embeddings()
-    
-    def _load_catalog(self):
-        """Load table catalog metadata"""
-        catalog_file = self.catalog_dir / "table_catalog_enhanced.json"
-        if not catalog_file.exists():
-            catalog_file = self.catalog_dir / "table_catalog.json"
-        
-        if not catalog_file.exists():
-            raise FileNotFoundError(f"Table catalog not found in {self.catalog_dir}")
-        
-        with open(catalog_file) as f:
-            catalog_data = json.load(f)
-        
-        if 'tables' in catalog_data:
-            self.tables = {table['table_id']: table for table in catalog_data['tables']}
+        if FAISS_AVAILABLE:
+            self._load_index()
         else:
-            self.tables = {table['table_id']: table for table in catalog_data}
-        
-        logger.info(f"Loaded {len(self.tables)} tables from catalog")
+            logger.warning("FAISS not available - table search disabled")
     
-    def _load_embeddings(self):
-        """Load FAISS embeddings for tables"""
-        faiss_file = self.catalog_dir / "table_embeddings_enhanced.faiss"
-        if not faiss_file.exists():
-            faiss_file = self.catalog_dir / "table_embeddings.faiss"
-        
-        if not faiss_file.exists():
-            raise FileNotFoundError(f"Table FAISS index not found in {self.catalog_dir}")
-        
-        self.embeddings_index = faiss.read_index(str(faiss_file))
-        
-        mapping_file = self.catalog_dir / "table_mapping_enhanced.json"
-        if not mapping_file.exists():
-            mapping_file = self.catalog_dir / "table_mapping.json"
-        
-        with open(mapping_file) as f:
-            mapping_data = json.load(f)
-        
-        self.table_ids = mapping_data['table_ids']
-        logger.info(f"✅ Table FAISS index loaded: {len(self.table_ids)} tables")
+    def _load_index(self):
+        """Load FAISS table index and metadata."""
+        try:
+            # Load FAISS index
+            index_path = self.catalog_dir / "table_embeddings.faiss"
+            if index_path.exists():
+                self.index = faiss.read_index(str(index_path))
+                logger.info(f"✅ Loaded table FAISS index with {self.index.ntotal} tables")
+            
+            # Load table IDs mapping
+            mapping_path = self.catalog_dir / "table_mapping.json"
+            if mapping_path.exists():
+                with open(mapping_path) as f:
+                    data = json.load(f)
+                    self.table_ids = data.get('table_ids', [])
+                logger.info(f"✅ Loaded {len(self.table_ids)} table IDs")
+            
+            # Load table catalog metadata
+            catalog_path = self.catalog_dir / "table_catalog.json"
+            if catalog_path.exists():
+                with open(catalog_path) as f:
+                    data = json.load(f)
+                    self.tables = data.get('tables', {})
+                logger.info(f"✅ Loaded metadata for {len(self.tables)} tables")
+            
+            # Load sentence transformer model
+            self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            logger.info("✅ Loaded sentence transformer model for tables")
+            
+        except Exception as e:
+            logger.error(f"Failed to load table search: {e}")
+            self.index = None
     
-    def search_tables(self, query: str, k: int = 5,
-                     geographic_context: Optional[GeographicContext] = None) -> List[Dict]:
-        """Search for relevant tables using FAISS"""
-        query_embedding = self.embedding_model.encode([query])
-        distances, indices = self.embeddings_index.search(query_embedding, k * 2)
+    def search(self, query: str, max_results: int = 10) -> List[TableResult]:
+        """Search tables using FAISS semantic similarity."""
+        if not self.index or not self.model:
+            logger.warning("Table search not available")
+            return []
         
-        results = []
-        for distance, idx in zip(distances[0], indices[0]):
-            if idx == -1 or idx >= len(self.table_ids):
-                continue
+        try:
+            # Encode query
+            query_embedding = self.model.encode([query])
             
-            table_id = self.table_ids[idx]
-            table_data = self.tables.get(table_id)
-            if not table_data:
-                continue
+            # Search FAISS index
+            scores, indices = self.index.search(query_embedding.astype('float32'), max_results)
             
-            similarity = max(0.0, 1.0 - (distance / 2.0))
-            geographic_relevance = self._calculate_geographic_relevance(table_data, geographic_context)
-            combined_score = similarity * (0.7 + 0.3 * geographic_relevance)
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < len(self.table_ids):
+                    table_id = self.table_ids[idx]
+                    table_info = self.tables.get(table_id, {})
+                    
+                    result = TableResult(
+                        table_id=table_id,
+                        title=table_info.get('title', table_id),
+                        universe=table_info.get('universe', ''),
+                        subject_area=table_info.get('subject_area', ''),
+                        confidence=float(1.0 - score)  # Convert distance to similarity
+                    )
+                    results.append(result)
             
-            results.append({
-                'table_id': table_id,
-                'table_data': table_data,
-                'confidence': similarity,
-                'geographic_relevance': geographic_relevance,
-                'combined_score': combined_score
-            })
-        
-        results.sort(key=lambda x: x['combined_score'], reverse=True)
-        return results[:k]
-    
-    def _calculate_geographic_relevance(self, table_data: Dict,
-                                      geographic_context: Optional[GeographicContext]) -> float:
-        """Calculate geographic relevance of table"""
-        if not geographic_context or not geographic_context.location_mentioned:
-            return 1.0
-        
-        geo_level = geographic_context.geography_level
-        available_levels = table_data.get('geography_levels', [])
-        
-        if geo_level in available_levels:
-            return 1.0
-        
-        # Geographic hierarchy fallbacks
-        if geo_level == 'cbsa':
-            if 'county' in available_levels or 'place' in available_levels:
-                return 0.95
-            if 'state' in available_levels:
-                return 0.85
-        
-        return 0.75
+            return results
+            
+        except Exception as e:
+            logger.error(f"Table search error: {e}")
+            return []
 
 class MethodologySearch:
-    """Statistical expertise search using ChromaDB"""
+    """ChromaDB-based methodology search."""
     
-    def __init__(self, methodology_dir: str = "methodology-db"):
+    def __init__(self, methodology_dir: str):
         self.methodology_dir = Path(methodology_dir)
         self.collection = None
-        self.embedding_model = OpenAIEmbeddings()
         
-        self._load_methodology_db()
+        if CHROMADB_AVAILABLE:
+            self._load_collection()
+        else:
+            logger.warning("ChromaDB not available - methodology search disabled")
     
-    def _load_methodology_db(self):
-        """Load ChromaDB methodology collection"""
-        client = chromadb.PersistentClient(
-            path=str(self.methodology_dir),
-            settings=Settings(anonymized_telemetry=False)
-        )
-        
+    def _load_collection(self):
+        """Load ChromaDB collection."""
         try:
+            client = chromadb.PersistentClient(path=str(self.methodology_dir))
             self.collection = client.get_collection("census_methodology")
-            doc_count = self.collection.count()
-            logger.info(f"✅ Methodology database loaded: {doc_count} documents")
+            count = self.collection.count()
+            logger.info(f"✅ Loaded methodology collection with {count} documents")
         except Exception as e:
-            logger.warning(f"Methodology collection not found: {e}")
+            logger.warning(f"Methodology search not available: {e}")
             self.collection = None
     
-    def search_methodology(self, query: str, k: int = 5) -> List[Dict]:
-        """Search methodology documents for statistical expertise"""
+    def search(self, query: str, max_results: int = 5) -> str:
+        """Search methodology documents."""
         if not self.collection:
-            return []
+            return ""
         
-        query_embedding = self.embedding_model.encode([query])[0].tolist()
+        try:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=max_results
+            )
+            
+            if results['documents']:
+                # Concatenate top results
+                context = "\n\n".join(results['documents'][0])
+                return context[:1000]  # Limit length
+            
+        except Exception as e:
+            logger.error(f"Methodology search error: {e}")
         
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=k,
-            include=['metadatas', 'documents', 'distances']
-        )
-        
-        methodology_results = []
-        for i in range(len(results['ids'][0])):
-            methodology_results.append({
-                'content': results['documents'][0][i],
-                'metadata': results['metadatas'][0][i],
-                'confidence': 1.0 - results['distances'][0][i],
-                'source': results['metadatas'][0][i].get('source', 'Unknown')
-            })
-        
-        return methodology_results
+        return ""
 
-class CensusSearchEngine:
+class ConceptBasedCensusSearchEngine:
     """
-    Clean modular Census search engine
+    Geography-free Census search engine.
     
-    Uses extracted components for coarse-to-fine semantic search:
-    1. TableCatalogSearch → Find relevant tables
-    2. VariablesSearch → Find variables within tables  
-    3. MethodologySearch → Add statistical context
+    Focuses purely on:
+    - Variable discovery (concept → Census variable IDs)
+    - Statistical methodology context
+    - Table catalog search
+    
+    NO geographic parsing - handled by MCP tools.
     """
     
-    def __init__(self,
-                 catalog_dir: str = "table-catalog",
-                 variables_dir: str = "variables-db",
-                 methodology_dir: str = "methodology-db",
-                 gazetteer_db_path: str = None):
+    def __init__(self, catalog_dir: str = None, variables_dir: str = None, methodology_dir: str = None):
+        """Initialize search components."""
         
-        if not os.getenv('OPENAI_API_KEY'):
-            raise ValueError("OPENAI_API_KEY environment variable required")
+        # Set default paths
+        if not catalog_dir or not variables_dir or not methodology_dir:
+            base_dir = Path(__file__).parent
+            catalog_dir = catalog_dir or str(base_dir / "table-catalog")
+            variables_dir = variables_dir or str(base_dir / "variables-db")
+            methodology_dir = methodology_dir or str(base_dir / "methodology-db")
         
-        # Initialize geographic intelligence
-        self.geo_parser = create_geographic_parser(gazetteer_db_path)
-        self.variable_preprocessor = create_variable_preprocessor()
-        self.query_detector = QueryTypeDetector()
-        
-        # Initialize modular search components
+        # Initialize search components
         self.table_search = TableCatalogSearch(catalog_dir)
-        self.variable_search = create_variables_search(variables_dir)
+        self.variables_search = VariablesSearch(variables_dir)
         self.methodology_search = MethodologySearch(methodology_dir)
         
-        logger.info("✅ Clean modular Census search engine initialized")
-        logger.info("✅ Components: TableSearch + VariablesSearch + MethodologySearch + Geographic")
+        logger.info("✅ ConceptBasedCensusSearchEngine initialized (geography-free)")
     
-    def search(self, query: str, max_results: int = 10) -> List[SearchResult]:
+    def search(self, query: str, max_results: int = 10) -> List[VariableResult]:
         """
-        Semantic search with modular architecture
+        Main search interface - find Census variables by concept.
+        
+        Args:
+            query: Natural language concept (e.g. "median household income")
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List of VariableResult with Census variable IDs and metadata
         """
-        logger.info(f"Searching: '{query}'")
         
-        # Step 1: Check for exact variable ID pattern
-        variable_id_match = re.match(r'^([A-Z]\d{5})_\d{3}[EM]?$', query.strip().upper())
-        if variable_id_match:
-            table_id = variable_id_match.group(1)
-            logger.info(f"Exact variable ID detected: {query} → table {table_id}")
-            return self._search_exact_variable(query.strip().upper(), table_id, max_results)
+        # Check for direct variable ID patterns first
+        if self._is_variable_id(query):
+            return self._direct_variable_lookup(query)
         
-        # Step 2: Parse context
-        geo_context = self.geo_parser.parse_geographic_context(query)
-        if geo_context.location_mentioned:
-            logger.info(f"Geographic context: {geo_context.location_text} ({geo_context.geography_level})")
+        # Use synonym mappings for common concepts
+        synonymized_query = self._apply_synonyms(query)
         
-        variable_preprocessing = self.variable_preprocessor.preprocess_query(query)
-        search_query = variable_preprocessing['enhanced_query']
+        # Search variables using FAISS
+        results = self.variables_search.search(synonymized_query, max_results)
         
-        # Step 3: Query type detection
-        query_type = self.query_detector.detect_query_type(search_query)
-        logger.info(f"Query type: {query_type}")
+        # Add methodology context to top results
+        if results and self.methodology_search.collection:
+            methodology_context = self.methodology_search.search(query)
+            if methodology_context:
+                # Add to top result
+                results[0].methodology_notes = methodology_context[:200]
         
-        all_results = []
-        
-        # Step 4: Variables search using modular components
-        if query_type in ['variables', 'both']:
-            all_results.extend(self._search_variables_modular(search_query, geo_context, max_results))
-        
-        # Step 5: Add methodology context
-        if query_type in ['methodology', 'both']:
-            methodology_context = self._search_methodology(search_query)
-            for result in all_results:
-                if not result.methodology_context and methodology_context:
-                    result.methodology_context = methodology_context[:500] + "..."
-        
-        # Step 6: Sort and return
-        all_results.sort(key=lambda x: x.confidence, reverse=True)
-        logger.info(f"Returning {min(len(all_results), max_results)} results")
-        return all_results[:max_results]
+        return results
     
-    def _search_variables_modular(self, query: str, geo_context: GeographicContext,
-                                max_results: int) -> List[SearchResult]:
-        """Search variables using modular coarse-to-fine retrieval"""
+    def _is_variable_id(self, query: str) -> bool:
+        """Check if query is already a Census variable ID."""
+        import re
+        # Pattern: B19013_001E, S1501_C01_001E, etc.
+        pattern = r'^[A-Z]+[0-9]+[A-Z]*_[0-9]+[A-Z]*$'
+        return bool(re.match(pattern, query.upper()))
+    
+    def _direct_variable_lookup(self, variable_id: str) -> List[VariableResult]:
+        """Direct lookup for variable IDs."""
+        variable_id = variable_id.upper()
         
-        # Coarse retrieval: find relevant tables
-        table_results = self.table_search.search_tables(query, k=5, geographic_context=geo_context)
-        logger.info(f"Found {len(table_results)} candidate tables")
-        
-        if not table_results:
-            return []
-        
-        # Fine retrieval: search within top tables using extracted component
-        variable_results = []
-        
-        for table_result in table_results:
-            table_id = table_result['table_id']
-            table_data = table_result['table_data']
-            table_confidence = table_result['confidence']
-            
-            # Use extracted VariablesSearch component
-            vars_in_table = self.variable_search.search_within_table(
-                table_id, query, geo_context, k=3
+        if self.variables_search.metadata and variable_id in self.variables_search.metadata:
+            metadata = self.variables_search.metadata[variable_id]
+            result = VariableResult(
+                variable_id=variable_id,
+                label=metadata.get('label', variable_id),
+                concept=metadata.get('concept', ''),
+                table_id=variable_id.split('_')[0],
+                confidence=1.0,
+                universe=metadata.get('universe')
             )
-            
-            # Convert to SearchResult objects
-            for var_result in vars_in_table:
-                var_metadata = var_result['variable_metadata']
-                variable_id = var_metadata.get('variable_id', '')
-                
-                combined_confidence = table_confidence * 0.6 + var_result['final_score'] * 0.4
-                
-                # Handle geography coverage
-                geography_coverage = {}
-                geo_coverage_raw = var_metadata.get('geography_coverage', {})
-                if isinstance(geo_coverage_raw, str):
-                    try:
-                        geography_coverage = json.loads(geo_coverage_raw) if geo_coverage_raw else {}
-                    except json.JSONDecodeError:
-                        geography_coverage = {}
-                else:
-                    geography_coverage = geo_coverage_raw or {}
-                
-                search_result = SearchResult(
-                    variable_id=variable_id,
-                    table_id=table_id,
-                    concept=var_metadata.get('concept', ''),
-                    label=var_metadata.get('label', ''),
-                    title=table_data.get('title', ''),
-                    universe=table_data.get('universe', ''),
-                    confidence=combined_confidence,
-                    geographic_relevance=var_result['geographic_score'],
-                    geographic_restrictions={
-                        'acs1': table_data.get('geography_restrictions_1yr', ''),
-                        'acs5': table_data.get('geography_restrictions_5yr', '')
-                    },
-                    available_surveys=var_metadata.get('available_surveys', ['acs5']),
-                    statistical_notes=table_data.get('statistical_notes', []),
-                    primary_variable=variable_id.endswith('_001E'),
-                    survey_instances=[],
-                    geography_coverage=geography_coverage,
-                    primary_instance=var_metadata.get('primary_instance'),
-                    structure_type=var_metadata.get('structure_type', 'concept_based')
-                )
-                
-                variable_results.append(search_result)
+            return [result]
         
-        return variable_results
+        return []
     
-    def _search_exact_variable(self, variable_id: str, table_id: str,
-                             max_results: int) -> List[SearchResult]:
-        """Search for exact variable ID using modular components"""
+    def _apply_synonyms(self, query: str) -> str:
+        """Apply synonym mappings for common Census concepts."""
+        query_lower = query.lower().strip()
         
-        # Check if table exists
-        table_data = self.table_search.tables.get(table_id)
-        if not table_data:
-            logger.warning(f"Table {table_id} not found for variable {variable_id}")
-            return []
+        # Common synonym mappings
+        synonyms = {
+            "population": "total population",
+            "median income": "median household income",
+            "poverty": "poverty rate income below poverty level",
+            "unemployment": "unemployment rate labor force",
+            "median age": "median age by sex",
+            "housing": "housing units occupied",
+            "rent": "median gross rent",
+            "home value": "median value owner occupied housing",
+            "education": "educational attainment",
+            "commute": "means of transportation to work",
+        }
         
-        logger.info(f"Direct table lookup: {table_id} - {table_data.get('title', 'Unknown')}")
+        for key, expanded in synonyms.items():
+            if key in query_lower:
+                return query_lower.replace(key, expanded)
         
-        # Use extracted VariablesSearch component for exact lookup
-        vars_in_table = self.variable_search.search_within_table(
-            table_id, variable_id, None, k=max_results
-        )
-        
-        if not vars_in_table:
-            logger.warning(f"Variable {variable_id} not found in table {table_id}")
-            return []
-        
-        # Convert to SearchResult objects
-        variable_results = []
-        
-        for var_result in vars_in_table:
-            var_metadata = var_result['variable_metadata']
-            found_variable_id = var_metadata.get('variable_id', '')
-            
-            # Prioritize exact matches
-            is_exact_match = found_variable_id == variable_id
-            confidence = 1.0 if is_exact_match else var_result['final_score']
-            
-            # Handle geography coverage
-            geography_coverage = {}
-            geo_coverage_raw = var_metadata.get('geography_coverage', {})
-            if isinstance(geo_coverage_raw, str):
-                try:
-                    geography_coverage = json.loads(geo_coverage_raw) if geo_coverage_raw else {}
-                except json.JSONDecodeError:
-                    geography_coverage = {}
-            else:
-                geography_coverage = geo_coverage_raw or {}
-            
-            search_result = SearchResult(
-                variable_id=found_variable_id,
-                table_id=table_id,
-                concept=var_metadata.get('concept', ''),
-                label=var_metadata.get('label', ''),
-                title=table_data.get('title', ''),
-                universe=table_data.get('universe', ''),
-                confidence=confidence,
-                geographic_relevance=1.0,  # Direct lookup has perfect relevance
-                geographic_restrictions={
-                    'acs1': table_data.get('geography_restrictions_1yr', ''),
-                    'acs5': table_data.get('geography_restrictions_5yr', '')
-                },
-                available_surveys=var_metadata.get('available_surveys', ['acs5']),
-                statistical_notes=table_data.get('statistical_notes', []),
-                primary_variable=found_variable_id.endswith('_001E'),
-                survey_instances=[],
-                geography_coverage=geography_coverage,
-                primary_instance=var_metadata.get('primary_instance'),
-                structure_type=var_metadata.get('structure_type', 'concept_based')
-            )
-            
-            variable_results.append(search_result)
-        
-        # Sort by exact match first, then by confidence
-        variable_results.sort(key=lambda x: (not (x.variable_id == variable_id), -x.confidence))
-        
-        logger.info(f"Direct lookup found {len(variable_results)} results, exact match: {any(r.variable_id == variable_id for r in variable_results)}")
-        return variable_results
+        return query
     
-    def _search_methodology(self, query: str) -> Optional[str]:
-        """Search methodology for statistical expertise context"""
-        try:
-            methodology_results = self.methodology_search.search_methodology(query, k=2)
-            if methodology_results:
-                return methodology_results[0]['content']
-        except Exception as e:
-            logger.warning(f"Methodology search failed: {e}")
-        
-        return None
+    def search_tables(self, query: str, max_results: int = 10) -> List[TableResult]:
+        """Search Census tables by concept."""
+        return self.table_search.search(query, max_results)
     
-    def get_table_info(self, table_id: str) -> Optional[Dict]:
-        """Get complete information about a table"""
-        return self.table_search.tables.get(table_id)
+    def _search_methodology(self, query: str) -> str:
+        """Search methodology documents (internal use)."""
+        return self.methodology_search.search(query)
     
-    def get_variable_info(self, variable_id: str) -> Optional[Dict]:
-        """Get complete information about a variable using modular component"""
-        return self.variable_search.get_variable_info(variable_id)
-    
-    def get_stats(self) -> Dict:
-        """Get statistics about the search engine components"""
-        variable_stats = self.variable_search.get_stats()
-        table_count = len(self.table_search.tables)
-        
+    def get_stats(self) -> Dict[str, Any]:
+        """Get search engine statistics."""
         return {
-            'tables': table_count,
-            'variables': variable_stats.get('total_variables', 0),
-            'methodology_docs': self.methodology_search.collection.count() if self.methodology_search.collection else 0,
-            'architecture': 'modular',
-            'components': ['TableCatalogSearch', 'VariablesSearch', 'MethodologySearch', 'GeographicParsing']
+            'variables_count': len(self.variables_search.variable_ids) if self.variables_search.variable_ids else 0,
+            'tables_count': len(self.table_search.tables),
+            'methodology_count': self.methodology_search.collection.count() if self.methodology_search.collection else 0,
+            'architecture': 'geography_free',
+            'components': ['TableCatalogSearch', 'VariablesSearch', 'MethodologySearch']
         }
 
 # Backward compatibility aliases
-ConceptBasedCensusSearchEngine = CensusSearchEngine
+CensusSearchEngine = ConceptBasedCensusSearchEngine
 
 # Factory function for MCP integration
-def create_search_engine(knowledge_base_dir: str = None,
-                        gazetteer_db_path: str = None) -> CensusSearchEngine:
-    """Create clean modular search engine"""
+def create_search_engine(knowledge_base_dir: str = None) -> ConceptBasedCensusSearchEngine:
+    """Create geography-free search engine for variable discovery."""
     
     if knowledge_base_dir:
         base_path = Path(knowledge_base_dir)
         catalog_dir = base_path / "table-catalog"
         variables_dir = base_path / "variables-db"
         methodology_dir = base_path / "methodology-db"
-        
-        # Auto-detect gazetteer if not specified
-        if not gazetteer_db_path:
-            potential_gazetteer = base_path / "geo-db" / "geography.db"
-            if potential_gazetteer.exists():
-                gazetteer_db_path = str(potential_gazetteer)
     else:
         # Default paths relative to current file
         base_dir = Path(__file__).parent
         catalog_dir = base_dir / "table-catalog"
         variables_dir = base_dir / "variables-db"
         methodology_dir = base_dir / "methodology-db"
-        
-        # Auto-detect gazetteer
-        if not gazetteer_db_path:
-            potential_gazetteer = base_dir / "geo-db" / "geography.db"
-            if potential_gazetteer.exists():
-                gazetteer_db_path = str(potential_gazetteer)
     
-    return CensusSearchEngine(
+    return ConceptBasedCensusSearchEngine(
         catalog_dir=str(catalog_dir),
         variables_dir=str(variables_dir),
-        methodology_dir=str(methodology_dir),
-        gazetteer_db_path=gazetteer_db_path
+        methodology_dir=str(methodology_dir)
     )
 
 if __name__ == "__main__":
-    # Test the modular search engine
-    logger.info("Testing Clean Modular Census Search Engine...")
+    # Test the geography-free search engine
+    logger.info("Testing Geography-Free Census Search Engine...")
     try:
         engine = create_search_engine()
         stats = engine.get_stats()
         logger.info(f"Engine stats: {stats}")
         
-        results = engine.search("B01003_001E", max_results=3)
+        results = engine.search("median household income", max_results=3)
         logger.info(f"Test search returned {len(results)} results")
         for result in results[:2]:
             logger.info(f"  {result.variable_id}: {result.label[:100]}...")

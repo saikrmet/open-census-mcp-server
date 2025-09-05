@@ -21,6 +21,21 @@ from pathlib import Path
 
 from openai import OpenAI
 
+# Load environment variables more robustly
+try:
+    from dotenv import load_dotenv
+    # Try multiple .env locations
+    for env_path in [
+        Path('.env'),
+        Path(__file__).parent / '.env',
+        Path(__file__).parent.parent / '.env'
+    ]:
+        if env_path.exists():
+            load_dotenv(env_path)
+            break
+except ImportError:
+    pass
+
 # Import existing modular components as tools
 from geographic_parsing import GeographicContext
 
@@ -221,6 +236,14 @@ Respond in JSON format with keys: statistical_requirements, variable_strategy, g
         
         variable_strategy = analysis.get('variable_strategy', '')
         
+        # Handle case where variable_strategy might be a dict instead of string
+        if isinstance(variable_strategy, dict):
+            # Convert dict to string representation for regex search
+            variable_strategy = str(variable_strategy)
+        elif not isinstance(variable_strategy, str):
+            # Fallback to empty string if it's neither dict nor string
+            variable_strategy = ''
+        
         # Extract potential search terms
         search_terms = []
         
@@ -228,6 +251,7 @@ Respond in JSON format with keys: statistical_requirements, variable_strategy, g
         import re
         table_matches = re.findall(r'B\d{5}', variable_strategy)
         search_terms.extend(table_matches)
+        logger.info(f"Found table families in strategy: {table_matches}")
         
         # Look for concept keywords
         concept_keywords = [
@@ -239,15 +263,20 @@ Respond in JSON format with keys: statistical_requirements, variable_strategy, g
             if keyword.lower() in variable_strategy.lower():
                 search_terms.append(keyword)
         
+        logger.info(f"Total search terms extracted: {search_terms}")
+        
         # Perform semantic search validation
         validated_variables = []
         
         for search_term in search_terms[:3]:  # Limit to top 3 terms
             try:
+                logger.info(f"Searching for variable with term: '{search_term}'")
                 # Global search for discovery
                 results = self.variable_search.search_variables_global(
                     search_term, geo_context, k=5
                 )
+                
+                logger.info(f"Search for '{search_term}' returned {len(results)} results")
                 
                 for result in results:
                     var_metadata = result['variable_metadata']
