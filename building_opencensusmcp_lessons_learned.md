@@ -6,7 +6,7 @@
 
 Built an AI statistical consultant for Census data that transforms "I need ACS Table B19013 for FIPS code 24510" into "What's the median income in Baltimore?" **Key lesson: Let LLMs do 90% of the work** - they excel at geographic parsing, variable selection, and statistical reasoning. Save the fancy RAG/vector search for the last 10%. 
 
-**Architecture insight:** LLM reasoning layer first, then specialized MCP knowledge bases for validation. **Reality check:** Any 8th grader should be able to access authoritative demographic data with proper context and limitations. **Technical battle:** Fought sentence transformers, configuration complexity, and the "personality problem" across sessions. **Bottom line:** We're building consultative AI that augments expert judgment, not automated lookup that bypasses human expertise.
+**Architecture insight:** The LLM reasoning layer is first, followed by specialized MCP knowledge bases for validation. **Reality check:** Any 8th grader should be able to access authoritative demographic data with proper context and limitations. **Technical battle:** Fought sentence transformers, configuration complexity, and the "personality problem" across sessions. **Bottom line:** We're building consultative AI that augments expert judgment, not automated lookup that bypasses human expertise.
 
 ## Value Proposition: Why We Need This
 
@@ -21,7 +21,7 @@ Census data is a treasure trove of information about our people and economy, but
 ### The Vision
 **Any 8th grader with an active imagination should be able to pull all kinds of authoritative data and get simple language explanations about it.**
 
-We're not building another API wrapper. We're delivering a **statistical consultant** that can understand what you're asking and give you helpful data with proper context, limitations, and methodology guidance.
+We're not building another API wrapper. We're delivering a **statistical consultant** who can understand what you're asking and provide you with helpful data, along with proper context, limitations, and guidance on methodology.
 
 **Before:** "I need ACS Table B19013 for FIPS code 24510 with margin of error calculations..."  
 **After:** "What's the median income in Baltimore compared to Maryland?"
@@ -139,7 +139,7 @@ MCPs feel like GenAI images in early 2022:
 - Limited options, mostly local environments
 
 ### Future Vision: Encapsulated Agent Framework
-**MCPs will make sense at the host/provider level** for making functions discoverable and useful. Currently building everything locally is like early agent development.
+**MCPs will make sense at the host/provider level** for making functions discoverable and useful. Currently, building everything locally is like early agent development.
 
 ### Refactoring Considerations
 The Open Census MCP could easily refactor as an agent workflow:
@@ -148,8 +148,10 @@ The Open Census MCP could easily refactor as an agent workflow:
 - QC agents could supervise and ensure accuracy
 - More flexibility for adding value without MCP bloat
 
+**Cross-Survey Architecture Potential**: Geographic intelligence is universal across federal surveys - FIPS codes and location parsing work for CPS, SIPP, ACS, etc. But each survey needs specialized knowledge bases for variables and methodology. The refactored architecture could share a Geographic Agent while maintaining survey-specific agents (CPS Knowledge Agent and ACS Knowledge Agent), as well as a Cross-Survey Mapping Agent for concept bridging. This would mostly resolve personality consistency issues through focused agent instructions, while enabling queries like "unemployment data" to intelligently route between ACS occupation information and CPS labor force statistics.
+
 ### Data Enrichment Strategy
-**Simple keyword and description expansion was a smart move** for broadening concept linkage and understanding. Probably didn't need as much enrichment as implemented, but the approach improved discoverability significantly.
+**Simple keyword and description expansion was a smart move** for broadening concept linkage and understanding. Probably didn't need as much enrichment as was implemented, but the approach significantly improved discoverability.
 
 ## Design Decisions and Tradeoffs
 
@@ -161,12 +163,12 @@ The Open Census MCP could easily refactor as an agent workflow:
 - Solution: Extract simple concepts and keywords, add metadata after discovery
 
 ### 2. LLM-First Architecture Challenges
-**Getting the LLM to be 'first' in the reasoning layer was a constant battle.** This is what leads toward potentially using separate agents or MCPs in a workflow approach rather than trying to embed everything in one system.
+**Getting the LLM to be 'first' in the reasoning layer was a constant battle. ** This is what leads to potentially using separate agents or MCPs in a workflow approach, rather than trying to embed everything in one system. **
 
 ### 3. The Authority Bias Problem
 **People tend to believe machine outputs without critical evaluation.** But humans are wrong all the time and have their own "hallucinations" in data interpretation.
 
-Using AI tools doesn't free us from the responsibility of reviewing outputs and applying critical thinking and human judgment. Information communication and assimilation always leaves room for distortion.
+Using AI tools doesn't free us from the responsibility of reviewing outputs and applying critical thinking and human judgment. Information, communication, and assimilation always leave room for distortion.
 
 ## Key Observations
 
