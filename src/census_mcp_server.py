@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Census MCP Server - Simple vs Complex Query Routing Implementation
+Clean Census MCP Server - Working Tools Only
 
-Flow:
-- Simple queries (single variable + single location) → Direct LLM URL construction
-- Complex queries (everything else) → Full methodology RAG treatment
+Removed the broken get_census_data tool. Uses only reliable two-step workflow:
+1. resolve_geography() - Find FIPS codes for locations
+2. get_demographic_data() - Get Census data with FIPS codes
+3. search_census_variables() - Find variable IDs (when available)
 """
 
 import asyncio
@@ -12,11 +13,8 @@ import json
 import logging
 import os
 import sys
-import re
-import requests
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 # Add knowledge-base directory to Python path FIRST
 current_dir = Path(__file__).parent
@@ -39,15 +37,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-@dataclass
-class Geography:
-    name: str
-    geo_type: str  # state, place, county, zcta, etc.
-    state_fips: Optional[str] = None
-    place_fips: Optional[str] = None
-    county_fips: Optional[str] = None
-    zcta_code: Optional[str] = None
 
 # Local imports with proper error handling
 try:
@@ -85,18 +74,17 @@ except ImportError as e:
 
 class CensusMCPServer:
     """
-    Census MCP server with simple vs complex query routing.
+    Clean Census MCP server with reliable tools only.
     
-    Simple: Single variable + single location -> Direct LLM construction
-    Complex: Everything else -> Methodology RAG
+    Working tools:
+    - resolve_geography: Find FIPS codes for locations
+    - get_demographic_data: Get Census data using FIPS codes  
+    - search_census_variables: Find variable IDs (when available)
     """
     
     def __init__(self):
         """Initialize server components."""
-        logger.info("Initializing Census MCP Server with Simple/Complex Routing...")
-        
-        self.api_key = os.environ.get('CENSUS_API_KEY')
-        self.base_url = "https://api.census.gov/data/2022/acs/acs5"
+        logger.info("Initializing Clean Census MCP Server...")
         
         try:
             geography_db_path = self._find_geography_db()
@@ -135,7 +123,7 @@ class CensusMCPServer:
         # Register tools
         self._register_tools()
         
-        logger.info("✅ Census MCP Server with Simple/Complex Routing initialized")
+        logger.info("✅ Clean Census MCP Server initialized")
     
     def _find_geography_db(self) -> str:
         """Find geography database in correct location."""
@@ -157,47 +145,21 @@ class CensusMCPServer:
         return str(default_path)
     
     def _register_tools(self):
-        """Register tools with simple/complex routing."""
+        """Register working tools only - removed broken get_census_data."""
         
         @self.server.list_tools()
         async def handle_list_tools() -> List[Tool]:
-            """Return list of available Census tools."""
+            """Return list of working Census tools."""
             tools = [
                 Tool(
-                    name="get_census_data",
-                    description="PRIMARY TOOL: Get official US Census demographic data using natural language. Always use this tool FIRST for Census questions. Uses Claude's knowledge when confident, falls back to RAG tools when uncertain.",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "Natural language location (e.g. 'St. Louis', 'Chicago, IL', 'Texas', '90210')"
-                            },
-                            "variables": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Data requested in natural language (e.g. 'population', 'median income', 'poverty rate') or Census variable IDs"
-                            },
-                            "include_methodology": {
-                                "type": "boolean",
-                                "description": "Include statistical guidance and methodology context",
-                                "default": True
-                            }
-                        },
-                        "required": ["location", "variables"]
-                    }
-                ),
-                
-                # FALLBACK TOOLS
-                Tool(
                     name="resolve_geography",
-                    description="FALLBACK: Use only when get_census_data indicates location is ambiguous and directs you here.",
+                    description="Find FIPS codes and geographic identifiers for locations. Use this first to get proper codes for Census queries.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "location": {
                                 "type": "string",
-                                "description": "Location to resolve"
+                                "description": "Location to resolve (e.g. 'Houston, TX', 'California', 'Kings County, NY')"
                             },
                             "max_results": {
                                 "type": "integer",
@@ -210,25 +172,25 @@ class CensusMCPServer:
                 ),
                 Tool(
                     name="get_demographic_data",
-                    description="FALLBACK: Use only when get_census_data fails or when you need precise FIPS code control.",
+                    description="Get Census demographic data using FIPS codes. Supports single locations and batch queries (use '*' for all counties/places in a state). Always use resolve_geography first to get FIPS codes.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "variables": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Census variable IDs or concepts"
+                                "description": "Census variable IDs (e.g. 'B19013_001E' for median income, 'B01003_001E' for population)"
                             },
                             "geography_type": {
                                 "type": "string",
-                                "description": "Type of geography: place, county, state, cbsa, zcta",
+                                "description": "Type of geography: place, county, state, cbsa, zcta, us",
                                 "enum": ["place", "county", "state", "cbsa", "zcta", "us"]
                             },
-                            "state_fips": {"type": "string", "description": "2-digit state FIPS code"},
-                            "place_fips": {"type": "string", "description": "5-digit place FIPS code"},
-                            "county_fips": {"type": "string", "description": "3-digit county FIPS code"},
-                            "cbsa_code": {"type": "string", "description": "5-digit CBSA code"},
-                            "zcta_code": {"type": "string", "description": "5-digit ZCTA code"}
+                            "state_fips": {"type": "string", "description": "2-digit state FIPS code (required for most geographies)"},
+                            "place_fips": {"type": "string", "description": "5-digit place FIPS code (for cities/towns) or '*' for all places in state"},
+                            "county_fips": {"type": "string", "description": "3-digit county FIPS code or '*' for all counties in state"},
+                            "cbsa_code": {"type": "string", "description": "5-digit CBSA code (metro areas)"},
+                            "zcta_code": {"type": "string", "description": "5-digit ZCTA code (ZIP code areas)"}
                         },
                         "required": ["variables", "geography_type"]
                     }
@@ -239,13 +201,13 @@ class CensusMCPServer:
             if self.search_engine:
                 tools.append(Tool(
                     name="search_census_variables",
-                    description="FALLBACK: Use only when get_census_data indicates variables need clarification and directs you here.",
+                    description="Search for Census variable IDs by concept or keyword. Use when you need to find the right variable codes for demographic data.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "Natural language description of desired data"
+                                "description": "Natural language description of desired data (e.g. 'median income', 'poverty rate', 'education')"
                             },
                             "max_results": {
                                 "type": "integer",
@@ -263,9 +225,7 @@ class CensusMCPServer:
         async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             """Handle tool calls."""
             try:
-                if name == "get_census_data":
-                    return await self._get_census_data_with_routing(arguments)
-                elif name == "resolve_geography":
+                if name == "resolve_geography":
                     return await self._resolve_geography(arguments)
                 elif name == "get_demographic_data":
                     return await self._get_demographic_data(arguments)
@@ -283,512 +243,8 @@ class CensusMCPServer:
                     text=f"❌ Error in {name}: {str(e)}"
                 )]
     
-    async def _get_census_data_with_routing(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """
-        Main routing logic: Simple vs Complex path decision.
-        
-        Simple: Single variable + single location -> Direct LLM construction
-        Complex: Everything else -> Methodology RAG
-        """
-        location = arguments.get("location", "").strip()
-        variables = arguments.get("variables", [])
-        include_methodology = arguments.get("include_methodology", True)
-        
-        if not location or not variables:
-            return [TextContent(
-                type="text",
-                text="Please provide both location and variables."
-            )]
-        
-        # Parse locations to detect multi-location queries
-        locations = self._parse_locations(location)
-        
-        # ROUTING DECISION
-        if len(variables) == 1 and len(locations) == 1:
-            logger.info(f"🚀 SIMPLE PATH: {variables[0]} for {location}")
-            return await self._simple_direct_construction(location, variables[0])
-        else:
-            logger.info(f"🧠 COMPLEX PATH: {len(variables)} variables, {len(locations)} locations")
-            return await self._complex_methodology_guided(location, variables, include_methodology)
-    
-    def _parse_locations(self, location: str) -> List[str]:
-        """Parse location string to detect multiple locations."""
-        # Simple heuristics for multi-location detection
-        if " and " in location.lower():
-            return [loc.strip() for loc in location.split(" and ")]
-        if " vs " in location.lower():
-            return [loc.strip() for loc in location.split(" vs ")]
-        if ", " in location and location.count(",") > 1:
-            # "Seattle, WA, Portland, OR" style
-            parts = location.split(", ")
-            if len(parts) >= 4:  # Assume city, state, city, state pattern
-                return [f"{parts[i]}, {parts[i+1]}" for i in range(0, len(parts)-1, 2)]
-        
-        return [location.strip()]
-    
-    async def _simple_direct_construction(self, location: str, variable: str) -> List[TextContent]:
-        """
-        Simple path: Single variable, single location.
-        LLM constructs Census API URL directly - no RAG needed.
-        """
-        try:
-            # Step 1: LLM parses geography
-            geo_info = self._llm_parse_geography(location)
-            if not geo_info:
-                # Fallback to complex path on parsing failure
-                logger.warning(f"Simple path geo parsing failed for: {location}")
-                return await self._complex_methodology_guided(location, [variable], True)
-            
-            # Step 2: LLM resolves variable
-            resolved_var = self._llm_resolve_variable(variable)
-            if not resolved_var:
-                logger.warning(f"Simple path variable resolution failed for: {variable}")
-                return await self._complex_methodology_guided(location, [variable], True)
-            
-            # Step 3: Construct API parameters directly
-            params = self._build_simple_api_params(resolved_var, geo_info)
-            if "error" in params:
-                logger.warning(f"Simple path API params failed: {params['error']}")
-                return await self._complex_methodology_guided(location, [variable], True)
-            
-            # Step 4: Make direct API call
-            response = requests.get(self.base_url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            # Step 5: Parse and return results
-            data = response.json()
-            return self._format_simple_response(data, resolved_var, location, geo_info)
-            
-        except Exception as e:
-            logger.warning(f"Simple path failed: {e}, falling back to complex")
-            # Always fall back to complex methodology path on any failure
-            return await self._complex_methodology_guided(location, [variable], True)
-    
-    def _llm_parse_geography(self, location: str) -> Optional[Geography]:
-        """
-        LLM geographic parsing - I CAN do this 99% of the time.
-        
-        Examples:
-        - "Seattle, WA" -> Geography(name="Seattle", geo_type="place", state_fips="53", place_fips="63000")
-        - "Texas" -> Geography(name="Texas", geo_type="state", state_fips="48")  
-        - "90210" -> Geography(name="90210", geo_type="zcta", zcta_code="90210")
-        """
-        location = location.strip()
-        
-        # ZIP code pattern
-        if re.match(r'^\d{5}$', location):
-            return Geography(
-                name=location,
-                geo_type="zcta",
-                zcta_code=location
-            )
-        
-        # State patterns
-        state_mappings = {
-            "texas": Geography("Texas", "state", "48"),
-            "tx": Geography("Texas", "state", "48"),
-            "california": Geography("California", "state", "06"),
-            "ca": Geography("California", "state", "06"),
-            "florida": Geography("Florida", "state", "12"),
-            "fl": Geography("Florida", "state", "12"),
-            "new york": Geography("New York", "state", "36"),
-            "ny": Geography("New York", "state", "36"),
-            "washington": Geography("Washington", "state", "53"),
-            "wa": Geography("Washington", "state", "53"),
-            "oregon": Geography("Oregon", "state", "41"),
-            "or": Geography("Oregon", "state", "41"),
-            "illinois": Geography("Illinois", "state", "17"),
-            "il": Geography("Illinois", "state", "17"),
-            "missouri": Geography("Missouri", "state", "29"),
-            "mo": Geography("Missouri", "state", "29"),
-        }
-        
-        if location.lower() in state_mappings:
-            return state_mappings[location.lower()]
-        
-        # City, State patterns
-        city_state_pattern = r'^(.+),\s*([A-Z]{2})$'
-        match = re.match(city_state_pattern, location)
-        if match:
-            city, state = match.groups()
-            
-            # Major city mappings (I know these)
-            major_cities = {
-                ("seattle", "wa"): Geography("Seattle, WA", "place", "53", "63000"),
-                ("portland", "or"): Geography("Portland, OR", "place", "41", "59000"),
-                ("austin", "tx"): Geography("Austin, TX", "place", "48", "05000"),
-                ("chicago", "il"): Geography("Chicago, IL", "place", "17", "14000"),
-                ("houston", "tx"): Geography("Houston, TX", "place", "48", "35000"),
-                ("phoenix", "az"): Geography("Phoenix, AZ", "place", "04", "55000"),
-                ("dallas", "tx"): Geography("Dallas, TX", "place", "48", "19000"),
-                ("san antonio", "tx"): Geography("San Antonio, TX", "place", "48", "65000"),
-                ("richmond", "va"): Geography("Richmond, VA", "place", "51", "67000"),
-                ("st. louis", "mo"): Geography("St. Louis, MO", "place", "29", "65000"),
-                ("st louis", "mo"): Geography("St. Louis, MO", "place", "29", "65000"),
-                ("new york", "ny"): Geography("New York, NY", "place", "36", "51000"),
-                ("los angeles", "ca"): Geography("Los Angeles, CA", "place", "06", "44000"),
-                ("denver", "co"): Geography("Denver, CO", "place", "08", "20000"),
-            }
-            
-            key = (city.lower(), state.lower())
-            if key in major_cities:
-                return major_cities[key]
-        
-        # If parsing fails, return None to trigger complex path fallback
-        logger.info(f"Geographic parsing uncertain for: {location}")
-        return None
-    
-    def _llm_resolve_variable(self, variable: str) -> Optional[str]:
-        """
-        LLM variable resolution - I know the common Census variables.
-        """
-        var_lower = variable.lower().strip()
-        
-        # Census variable IDs - already resolved
-        if variable.upper().endswith('E') and '_' in variable and len(variable) >= 10:
-            return variable.upper()
-        
-        # Common concepts I know well
-        variable_mappings = {
-            "population": "B01003_001E",
-            "total population": "B01003_001E",
-            "median income": "B19013_001E",
-            "median household income": "B19013_001E",
-            "poverty": "B17001_002E",
-            "poverty rate": "B17001_002E",
-            "unemployment": "B23025_005E",
-            "unemployment rate": "B23025_005E",
-            "median age": "B01002_001E",
-            "age": "B01002_001E",
-            "median rent": "B25064_001E",
-            "rent": "B25064_001E",
-            "median home value": "B25077_001E",
-            "home value": "B25077_001E",
-            "households": "B25001_001E",
-            "total households": "B25001_001E",
-        }
-        
-        if var_lower in variable_mappings:
-            return variable_mappings[var_lower]
-        
-        # If uncertain, return None to trigger complex path
-        logger.info(f"Variable resolution uncertain for: {variable}")
-        return None
-    
-    def _build_simple_api_params(self, variable: str, geo_info: Geography) -> Dict[str, Any]:
-        """Build Census API parameters for simple queries."""
-        params = {"get": variable}
-        
-        if self.api_key:
-            params["key"] = self.api_key
-        
-        # Build geography clauses based on geo_info
-        if geo_info.geo_type == "state":
-            params["for"] = f"state:{geo_info.state_fips}"
-        
-        elif geo_info.geo_type == "place":
-            params["for"] = f"place:{geo_info.place_fips}"
-            params["in"] = f"state:{geo_info.state_fips}"
-        
-        elif geo_info.geo_type == "county":
-            params["for"] = f"county:{geo_info.county_fips}"
-            params["in"] = f"state:{geo_info.state_fips}"
-        
-        elif geo_info.geo_type == "zcta":
-            params["for"] = f"zip code tabulation area:{geo_info.zcta_code}"
-        
-        else:
-            return {"error": f"Unsupported geography type: {geo_info.geo_type}"}
-        
-        return params
-    
-    def _format_simple_response(self, data: List[List], variable: str, location: str, geo_info: Geography) -> List[TextContent]:
-        """Format simple Census API response."""
-        if len(data) < 2:
-            return [TextContent(type="text", text="❌ Invalid Census API response format")]
-        
-        headers = data[0]
-        values = data[1]
-        
-        # Find variable value
-        try:
-            var_index = headers.index(variable)
-            estimate = values[var_index]
-            
-            # Format the estimate
-            formatted_estimate = "N/A"
-            if estimate and estimate != "-":
-                try:
-                    num_estimate = float(estimate)
-                    formatted_estimate = f"{num_estimate:,.0f}"
-                except ValueError:
-                    formatted_estimate = str(estimate)
-            
-            response_parts = [
-                f"**Official Census Data Results**",
-                f"📍 **Location**: {geo_info.name}",
-                f"📊 **Variable**: {variable}",
-                f"📈 **Value**: {formatted_estimate}",
-                f"📋 **Source**: U.S. Census Bureau ACS 5-Year 2022",
-                f"🚀 **Method**: Simple direct construction (optimized path)"
-            ]
-            
-            # Add context note based on geography type
-            if geo_info.geo_type == "place":
-                response_parts.append("")
-                response_parts.append("**Note**: Data reflects incorporated city limits, not metropolitan area.")
-            
-            return [TextContent(type="text", text="\n".join(response_parts))]
-            
-        except (ValueError, IndexError) as e:
-            return [TextContent(type="text", text=f"❌ Could not extract variable {variable}: {e}")]
-    
-    async def _complex_methodology_guided(self, location: str, variables: List[str], include_methodology: bool = True) -> List[TextContent]:
-        """
-        Complex path: Multiple variables/locations or uncertain queries.
-        Uses full methodology RAG for intelligent variable selection and geography choices.
-        """
-        logger.info(f"Complex path processing: {len(variables)} variables for {location}")
-        
-        # For now, fall back to the existing streamlined implementation
-        # In a full implementation, this would:
-        # 1. Consult variable ontology for concept mapping
-        # 2. Check geography compatibility matrix
-        # 3. Validate statistical reliability (MOE analysis)
-        # 4. Select optimal dataset (ACS1 vs ACS5)
-        # 5. Execute multi-step data retrieval with proper joins
-        
-        # Delegate to existing complex implementation
-        arguments = {
-            "location": location,
-            "variables": variables,
-            "include_methodology": include_methodology
-        }
-        
-        return await self._get_census_data_streamlined(arguments)
-    
-    async def _get_census_data_streamlined(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """
-        Existing streamlined implementation for complex queries.
-        Uses confidence-based RAG fallbacks.
-        """
-        location = arguments.get("location", "").strip()
-        variables = arguments.get("variables", [])
-        include_methodology = arguments.get("include_methodology", True)
-        
-        if not location or not variables:
-            return [TextContent(
-                type="text",
-                text="Please provide both location and variables."
-            )]
-        
-        logger.info(f"Complex Census query: {variables} for {location}")
-        
-        # Step 1: Resolve location using confidence-based approach
-        geo_result = self._resolve_location_with_confidence(location)
-        
-        if geo_result["confidence"] < 0.6:
-            # Low confidence - direct to RAG geography tool
-            logger.info(f"Low geo confidence ({geo_result['confidence']:.2f}), directing to RAG")
-            return [TextContent(
-                type="text",
-                text=f"Location '{location}' is ambiguous. Use resolve_geography('{location}') to see disambiguation options."
-            )]
-        
-        # Step 2: Resolve variables using confidence-based approach
-        var_result = self._resolve_variables_with_confidence(variables)
-        
-        if var_result["confidence"] < 0.6:
-            # Low confidence - direct to RAG variable tool
-            logger.info(f"Low variable confidence ({var_result['confidence']:.2f}), directing to RAG")
-            return [TextContent(
-                type="text",
-                text=f"Variables {variables} need clarification. Use search_census_variables('{' '.join(variables)}') to find specific Census codes."
-            )]
-        
-        # Step 3: Use Census API for official data
-        if not self.census_api:
-            return [TextContent(type="text", text="Census API not available.")]
-        
-        try:
-            results = self.census_api.get_acs_data(
-                variables=list(var_result["variables"].keys()),
-                **geo_result["parameters"]
-            )
-            
-            if "error" in results:
-                return [TextContent(type="text", text=f"Census API error: {results['error']}")]
-            
-            # Step 4: Format with methodology context
-            return await self._format_response_with_methodology(
-                results, geo_result, var_result, location, variables, include_methodology
-            )
-            
-        except Exception as e:
-            logger.error(f"Census API error: {e}")
-            return [TextContent(type="text", text=f"Error retrieving data: {str(e)}")]
-    
-    def _resolve_location_with_confidence(self, location: str) -> Dict[str, Any]:
-        """Use my knowledge to resolve location, return confidence score."""
-        
-        location_lower = location.lower().strip()
-        
-        # High confidence locations I know well
-        if location_lower in ["st. louis", "saint louis", "st louis"]:
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "place", "state_fips": "29", "place_fips": "65000"},
-                "resolved_name": "St. Louis city, Missouri"
-            }
-        elif location_lower == "chicago":
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "place", "state_fips": "17", "place_fips": "14000"},
-                "resolved_name": "Chicago city, Illinois"
-            }
-        elif location_lower == "new york":
-            return {
-                "confidence": 0.90,
-                "parameters": {"geography_type": "place", "state_fips": "36", "place_fips": "51000"},
-                "resolved_name": "New York city, New York"
-            }
-        elif location_lower in ["texas", "tx"]:
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "state", "state_fips": "48"},
-                "resolved_name": "Texas"
-            }
-        elif location_lower in ["missouri", "mo"]:
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "state", "state_fips": "29"},
-                "resolved_name": "Missouri"
-            }
-        elif location_lower in ["illinois", "il"]:
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "state", "state_fips": "17"},
-                "resolved_name": "Illinois"
-            }
-        elif location_lower in ["california", "ca"]:
-            return {
-                "confidence": 0.95,
-                "parameters": {"geography_type": "state", "state_fips": "06"},
-                "resolved_name": "California"
-            }
-        
-        # High confidence - "City, ST" format is unambiguous
-        elif "," in location and len(location.split(",")[1].strip()) == 2:
-            # Format like "City, ST" - high confidence
-            return {"confidence": 0.75, "parameters": {}, "resolved_name": location}
-        
-        # Low confidence - need RAG assistance
-        else:
-            return {"confidence": 0.3, "parameters": {}, "resolved_name": location}
-    
-    def _resolve_variables_with_confidence(self, variables: List[str]) -> Dict[str, Any]:
-        """Use my knowledge to resolve variables, return confidence score."""
-        
-        resolved_vars = {}
-        total_confidence = 0
-        
-        for var in variables:
-            var_lower = var.lower().strip()
-            
-            # Census variable IDs - highest confidence
-            if var.upper().endswith('E') and '_' in var and len(var) >= 10:
-                resolved_vars[var.upper()] = {"label": var.upper(), "confidence": 1.0}
-                total_confidence += 1.0
-            
-            # Common concepts I know well
-            elif var_lower in ["population", "total population"]:
-                resolved_vars["B01003_001E"] = {"label": "Total Population", "confidence": 0.95}
-                total_confidence += 0.95
-            elif var_lower in ["median income", "median household income"]:
-                resolved_vars["B19013_001E"] = {"label": "Median Household Income", "confidence": 0.95}
-                total_confidence += 0.95
-            elif var_lower in ["poverty", "poverty rate"]:
-                resolved_vars["B17001_002E"] = {"label": "Income Below Poverty Level", "confidence": 0.90}
-                total_confidence += 0.90
-            elif var_lower in ["unemployment", "unemployment rate"]:
-                resolved_vars["B23025_005E"] = {"label": "Unemployed Population", "confidence": 0.85}
-                total_confidence += 0.85
-            elif var_lower in ["median age", "age"]:
-                resolved_vars["B01002_001E"] = {"label": "Median Age", "confidence": 0.90}
-                total_confidence += 0.90
-            
-            # Lower confidence - might need RAG
-            else:
-                total_confidence += 0.4
-        
-        avg_confidence = total_confidence / len(variables) if variables else 0
-        
-        return {
-            "confidence": avg_confidence,
-            "variables": resolved_vars,
-            "resolved_count": len(resolved_vars)
-        }
-    
-    async def _format_response_with_methodology(self, results: Dict, geo_result: Dict,
-                                              var_result: Dict, original_location: str,
-                                              original_vars: List[str], include_methodology: bool) -> List[TextContent]:
-        """Format response with official data and methodology guidance."""
-        
-        response_parts = [
-            f"**Official Census Data Results**",
-            f"📍 **Location**: {results.get('location_name', geo_result['resolved_name'])}",
-            f"📋 **Source**: {results.get('source', 'U.S. Census Bureau ACS 2022')}",
-            f"🧠 **Method**: Complex methodology-guided path"
-        ]
-        
-        # Data table
-        if results.get("data"):
-            response_parts.extend([
-                "",
-                "| Variable | Value | Margin of Error |",
-                "|----------|-------|-----------------|"
-            ])
-            
-            for var_id, var_data in results["data"].items():
-                if isinstance(var_data, dict):
-                    estimate = var_data.get("estimate", "N/A")
-                    moe = var_data.get("moe", "N/A")
-                    label = var_data.get("label", var_id)
-                    
-                    # Format numbers
-                    if isinstance(estimate, (int, float)) and estimate != "N/A":
-                        estimate = f"{estimate:,}"
-                    if isinstance(moe, (int, float)) and moe != "N/A":
-                        moe = f"±{moe:,}"
-                    
-                    response_parts.append(f"| {label} | {estimate} | {moe} |")
-        
-        # Add methodology context if requested
-        if include_methodology and self.search_engine:
-            try:
-                # Search for methodology context using the search engine
-                methodology_query = f"{' '.join(original_vars)} {original_location} methodology"
-                methodology_results = self.search_engine._search_methodology(methodology_query)
-                
-                if methodology_results:
-                    response_parts.extend([
-                        "",
-                        "**Statistical Context:**",
-                        methodology_results[:200] + "..."
-                    ])
-            except Exception as e:
-                logger.warning(f"Could not retrieve methodology context: {e}")
-        
-        # Add data fitness warnings for specific cases
-        if geo_result["parameters"].get("geography_type") == "place":
-            response_parts.append("")
-            response_parts.append("**Note**: This data is for the incorporated city limits only, not the metropolitan area.")
-        
-        return [TextContent(type="text", text="\n".join(response_parts))]
-    
-    # FALLBACK TOOL IMPLEMENTATIONS (unchanged from original)
     async def _resolve_geography(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """FALLBACK: Resolve geography using gazetteer database."""
+        """Resolve geography using gazetteer database."""
         location = arguments.get("location", "").strip()
         max_results = arguments.get("max_results", 10)
         
@@ -809,28 +265,71 @@ class CensusMCPServer:
                     text=f"No geographic matches found for '{location}'. Try adding state context or using full place names."
                 )]
             
-            # Format results for Claude to reason with
-            response_parts = [f"Geographic matches for '{location}':"]
+            # Format results with comprehensive geographic metadata
+            response_parts = [f"**Geographic Resolution Results for '{location}':**\n"]
             
             for i, match in enumerate(matches, 1):
-                response_parts.append(f"\n{i}. {match['name']} ({match['geography_type'].title()})")
+                response_parts.append(f"**{i}. {match['name']} ({match['geography_type'].title()})**")
                 if match.get('state_abbrev'):
-                    response_parts.append(f"   State: {match['state_abbrev']}")
-                response_parts.append(f"   Confidence: {match['confidence']:.3f}")
+                    response_parts.append(f"   **State**: {match['state_abbrev']}")
+                response_parts.append(f"   **Confidence**: {match['confidence']:.3f}")
                 
-                # Add FIPS codes for API calls
-                fips_info = []
+                # Comprehensive geographic identifiers
+                identifiers = []
                 if match.get('state_fips'):
-                    fips_info.append(f"state_fips: {match['state_fips']}")
+                    identifiers.append(f"state_fips: '{match['state_fips']}'")
                 if match.get('place_fips'):
-                    fips_info.append(f"place_fips: {match['place_fips']}")
+                    identifiers.append(f"place_fips: '{match['place_fips']}'")
                 if match.get('county_fips'):
-                    fips_info.append(f"county_fips: {match['county_fips']}")
+                    identifiers.append(f"county_fips: '{match['county_fips']}'")
+                if match.get('cbsa_code'):
+                    identifiers.append(f"cbsa_code: '{match['cbsa_code']}'")
+                if match.get('zcta_code'):
+                    identifiers.append(f"zcta_code: '{match['zcta_code']}'")
                 
-                if fips_info:
-                    response_parts.append(f"   FIPS: {', '.join(fips_info)}")
+                if identifiers:
+                    response_parts.append(f"   **Geographic Codes**: {', '.join(identifiers)}")
+                response_parts.append("")
             
-            response_parts.append(f"\nUse get_demographic_data with the FIPS codes from your chosen location.")
+            response_parts.extend([
+                "**Comprehensive Data Retrieval Options:**",
+                "",
+                "**Single Location Analysis:**",
+                "```",
+                f"get_demographic_data(",
+                f"  geography_type='{matches[0]['geography_type']}',",
+                f"  state_fips='{matches[0].get('state_fips', 'XX')}',",
+            ])
+            
+            if matches[0].get('place_fips'):
+                response_parts.append(f"  place_fips='{matches[0]['place_fips']}',")
+            elif matches[0].get('county_fips'):
+                response_parts.append(f"  county_fips='{matches[0]['county_fips']}',")
+            elif matches[0].get('cbsa_code'):
+                response_parts.append(f"  cbsa_code='{matches[0]['cbsa_code']}',")
+            
+            response_parts.extend([
+                f"  variables=['B19013_001E', 'B01003_001E']  # Income + Population",
+                ")",
+                "```",
+                "",
+                "**Batch Analysis (All Counties/Places in State):**",
+                "```",
+                f"get_demographic_data(",
+                f"  geography_type='county',",
+                f"  state_fips='{matches[0].get('state_fips', 'XX')}',",
+                f"  county_fips='*',  # All counties - systematic analysis",
+                f"  variables=['B17001_002E']  # Poverty data for ranking",
+                ")",
+                "```",
+                "",
+                "**Variable Discovery:**",
+                "```",
+                "search_census_variables('median household income')",
+                "search_census_variables('educational attainment')",
+                "search_census_variables('housing costs')",
+                "```"
+            ])
             
             return [TextContent(type="text", text="\n".join(response_parts))]
         
@@ -839,7 +338,7 @@ class CensusMCPServer:
             return [TextContent(type="text", text=f"Error resolving geography: {str(e)}")]
     
     async def _get_demographic_data(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """FALLBACK: Get demographic data using resolved FIPS codes. Now supports batch queries."""
+        """Get demographic data using resolved FIPS codes. Supports batch queries."""
         if not self.census_api:
             return [TextContent(type="text", text="Census API not available.")]
         
@@ -872,6 +371,18 @@ class CensusMCPServer:
                 return [TextContent(type="text", text="State geography requires state_fips.")]
             geo_params.update({"state_fips": state_fips})
         
+        elif geography_type == "cbsa":
+            cbsa_code = arguments.get("cbsa_code")
+            if not cbsa_code:
+                return [TextContent(type="text", text="CBSA geography requires cbsa_code.")]
+            geo_params.update({"cbsa_code": cbsa_code})
+        
+        elif geography_type == "zcta":
+            zcta_code = arguments.get("zcta_code")
+            if not zcta_code:
+                return [TextContent(type="text", text="ZCTA geography requires zcta_code.")]
+            geo_params.update({"zcta_code": zcta_code})
+        
         elif geography_type == "us":
             pass
         
@@ -886,7 +397,7 @@ class CensusMCPServer:
             # Format response - handle both single and batch queries
             response_parts = [
                 f"**Official Census Data Results**",
-                f"Geography: {geography_type.title()}",
+                f"**Geography**: {geography_type.title()}",
             ]
             
             if results.get("data"):
@@ -895,8 +406,8 @@ class CensusMCPServer:
                     # Format batch results
                     total_geos = results.get("total_geographies", 0)
                     response_parts.extend([
-                        f"**Batch Query: {total_geos} geographies (sorted by first variable)**",
-                        f"Location: {results.get('location_name', 'Multiple geographies')}",
+                        f"**Batch Query**: {total_geos} geographies (sorted by first variable)",
+                        f"**Location**: {results.get('location_name', 'Multiple geographies')}",
                         "",
                         "| Rank | Location | Value | Variable |",
                         "|------|----------|-------|----------|"
@@ -913,7 +424,7 @@ class CensusMCPServer:
                             response_parts.append(f"| {rank} | {location_name} | {estimate} | {label} |")
                             break  # Only show first variable in batch summary
                     
-                    # Add note about sorting and additional variables
+                    # Add note about additional variables
                     if len(variables) > 1:
                         response_parts.extend([
                             "",
@@ -921,8 +432,8 @@ class CensusMCPServer:
                         ])
                     
                 else:
-                    # Format single geography results (original behavior)
-                    response_parts.append(f"Location: {results.get('location_name', 'Unknown')}")
+                    # Format single geography results
+                    response_parts.append(f"**Location**: {results.get('location_name', 'Unknown')}")
                     response_parts.extend([
                         "",
                         "| Variable | Value | Margin of Error |",
@@ -943,7 +454,7 @@ class CensusMCPServer:
                             
                             response_parts.append(f"| {label} | {estimate} | {moe} |")
             
-            response_parts.append(f"\nSource: {results.get('source', 'U.S. Census Bureau ACS 2023')}")
+            response_parts.append(f"\n**Source**: {results.get('source', 'U.S. Census Bureau ACS 2023')}")
             
             return [TextContent(type="text", text="\n".join(response_parts))]
         
@@ -952,7 +463,7 @@ class CensusMCPServer:
             return [TextContent(type="text", text=f"Error retrieving Census data: {str(e)}")]
     
     async def _search_census_variables(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """FALLBACK: Search variables using concept-based engine."""
+        """Search variables using concept-based engine."""
         if not self.search_engine:
             return [TextContent(type="text", text="Variable search not available.")]
         
@@ -969,12 +480,16 @@ class CensusMCPServer:
             if not results:
                 return [TextContent(type="text", text=f"No variables found for query: '{query}'")]
             
-            response_parts = [f"Found {len(results)} variables for: '{query}'"]
+            response_parts = [f"**Found {len(results)} variables for: '{query}'**\n"]
             
             for i, result in enumerate(results, 1):
-                response_parts.append(f"\n{i}. {result.variable_id}")
-                response_parts.append(f"   {result.label}")
-                response_parts.append(f"   Confidence: {result.confidence:.3f}")
+                response_parts.append(f"**{i}. {result.variable_id}**")
+                response_parts.append(f"   **Label**: {result.label}")
+                response_parts.append(f"   **Concept**: {getattr(result, 'concept', 'Unknown')}")
+                response_parts.append(f"   **Confidence**: {result.confidence:.3f}")
+                response_parts.append("")
+            
+            response_parts.append("**Next step**: Use these variable IDs with `get_demographic_data`")
             
             return [TextContent(type="text", text="\n".join(response_parts))]
             
@@ -984,7 +499,7 @@ class CensusMCPServer:
 
 async def main():
     """Main server entry point."""
-    logger.info("Starting Census MCP Server with Simple/Complex Routing...")
+    logger.info("Starting Clean Census MCP Server...")
     
     try:
         census_server = CensusMCPServer()
