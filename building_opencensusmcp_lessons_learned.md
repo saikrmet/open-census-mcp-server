@@ -8,6 +8,26 @@ Built an AI statistical consultant for Census data that transforms "I need ACS T
 
 **Architecture insight:** The LLM reasoning layer is first, followed by specialized MCP knowledge bases for validation. **Reality check:** Any 8th grader should be able to access authoritative demographic data with proper context and limitations. **Technical battle:** Fought sentence transformers, configuration complexity, and the "personality problem" across sessions. **Bottom line:** We're building consultative AI that augments expert judgment, not automated lookup that bypasses human expertise.
 
+## Overview
+
+This document covers the key lessons learned from building the Open Census MCP, an AI-powered statistical consultant for U.S. Census data. The project demonstrates how to combine LLM reasoning with specialized knowledge bases to democratize access to authoritative demographic information.
+
+### What We Built
+
+- LLM-first architecture for Census data consultation
+- Natural language interface to 36K+ Census variables
+- Geographic resolution using AI interpretation
+- Statistical methodology guidance system
+- Docker containerized MCP server
+
+### Key Insights Covered
+
+- The 90/10 rule for LLM vs specialized tools
+- Technical tradeoffs in vector embeddings
+- Configuration management lessons
+- Error handling in distributed AI systems
+- Cross-survey architecture potential
+
 ## Value Proposition: Why We Need This
 
 ### The Problem
@@ -236,8 +256,7 @@ This approach could extend to:
 - **Community-driven enhancements** leveraging open source ecosystems
 
 ### Policy and Access Implications
-**The future of government data is consultative intelligence** that augments expert judgment rather than automated retrieval that bypasses human expertise. Success requires balancing accessibility with statistical rigor.
-
+There is high potential for improving access and the ability to gather and develop evidence based on data that is fit for use and purpose. Success comes through improved communication using simple language and concepts that are more relatable to the audience, while maintaining statistical rigor and methodological transparency.
 ---
 
 *This project represents a paradigm shift from data lookup to statistical consultation, demonstrating that AI can democratize access to authoritative information while maintaining methodological integrity.*
