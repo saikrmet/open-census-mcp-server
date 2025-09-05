@@ -39,9 +39,9 @@ STATE_ABBREVS = {
     'NH': 'New Hampshire', 'NJ': 'New Jersey', 'NM': 'New Mexico', 'NY': 'New York',
     'NC': 'North Carolina', 'ND': 'North Dakota', 'OH': 'Ohio', 'OK': 'Oklahoma',
     'OR': 'Oregon', 'PA': 'Pennsylvania', 'RI': 'Rhode Island', 'SC': 'South Carolina',
-    'SD': 'South Dakota', 'TN': 'Tennessee', 'TX': 'Texas', 'UT': 'Utah',
-    'VT': 'Vermont', 'VA': 'Virginia', 'WA': 'Washington', 'WV': 'West Virginia',
-    'WI': 'Wisconsin', 'WY': 'Wyoming', 'DC': 'District of Columbia'
+    'SD': 'South Dakota', 'TN': 'Tennessee', 'TX': '48', 'UT': '49', 'VT': '50',
+    'VA': '51', 'WA': '53', 'WV': '54', 'WI': '55', 'WY': '56',
+    'DC': '11'
 }
 
 # Reverse mapping: full names to abbreviations
@@ -186,6 +186,29 @@ VARIABLE_MAPPINGS = {
     'public assistance': 'B19057_002E',
     'welfare': 'B19057_002E',
     'medicaid': 'B27003_006E',  # With Medicaid coverage
+    
+    # Occupation - Major occupation groups (available at state/county level)
+    'construction workers': 'C24010_029E',  # Construction and extraction occupations (male)
+    'construction': 'C24010_029E',
+    'construction trades': 'C24010_029E',
+    'construction and extraction': 'C24010_029E',
+    'construction female': 'C24010_065E',  # Construction and extraction occupations (female)
+    'healthcare workers': 'C24010_030E',  # Healthcare practitioners and technical occupations
+    'healthcare': 'C24010_030E',
+    'nurses': 'C24010_030E',  # Part of healthcare practitioners
+    'teachers': 'C24010_032E',  # Education, training, and library occupations
+    'education workers': 'C24010_032E',
+    'retail workers': 'C24010_036E',  # Sales and related occupations
+    'sales workers': 'C24010_036E',
+    'food service': 'C24010_037E',  # Food preparation and serving related occupations
+    'restaurant workers': 'C24010_037E',
+    'office workers': 'C24010_034E',  # Office and administrative support occupations
+    'administrative support': 'C24010_034E',
+    'management': 'C24010_027E',  # Management occupations
+    'managers': 'C24010_027E',
+    'professional occupations': 'C24010_028E',  # Business and financial operations occupations
+    'business operations': 'C24010_028E',
+    'total employed': 'C24010_001E',  # Total civilian employed population 16 years and over
 }
 
 # =============================================================================
