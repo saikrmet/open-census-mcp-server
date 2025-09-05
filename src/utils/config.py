@@ -39,6 +39,17 @@ class Config:
     def _load_config(self):
         """Load configuration from environment, files, and defaults."""
         
+        # Load .env file first
+        try:
+            from dotenv import load_dotenv
+            env_file = self.base_dir / ".env" if hasattr(self, 'base_dir') else Path(__file__).parent.parent.parent / ".env"
+            load_dotenv(env_file)
+            logger.info(f"✅ Loaded .env file from {env_file}")
+        except ImportError:
+            logger.warning("python-dotenv not installed. Install with: pip install python-dotenv")
+        except Exception as e:
+            logger.warning(f"Could not load .env file: {e}")
+        
         # Base paths - container-aware
         self.base_dir = Path(os.getenv('CENSUS_MCP_BASE', Path(__file__).parent.parent.parent))
         self.data_dir = self.base_dir / "data"

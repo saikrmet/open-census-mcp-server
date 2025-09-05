@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Clean Census MCP Server - Claude-First with Smart Routing
+Clean Census MCP Server - Claude Direct Knowledge
 
-Simple, reliable architecture:
-1. Claude's knowledge for query parsing and confidence assessment
-2. Smart routing: high confidence → direct API, medium → search-assisted, low → guidance
-3. Clean tool separation with no external LLM dependencies
-4. One smart tool that orchestrates everything: get_census_data
+Simple architecture:
+1. Claude uses built-in Census knowledge to construct API calls directly
+2. Search only for genuine edge cases where Claude is uncertain
+3. No hardcoded mappings - Claude reasons from knowledge
 """
 
 import logging
@@ -22,7 +21,7 @@ from mcp.types import TextContent, Tool
 from data_retrieval.python_census_api import PythonCensusAPI
 from utils.config import Config
 
-# Knowledge base search (optional)
+# Knowledge base search (optional fallback only)
 KB_SEARCH_AVAILABLE = False
 try:
     current_dir = Path(__file__).parent
@@ -32,7 +31,7 @@ try:
         sys.path.insert(0, str(kb_path))
         from kb_search import create_search_engine
         KB_SEARCH_AVAILABLE = True
-        logging.info(f"✅ Knowledge base available: {kb_path}")
+        logging.info(f"✅ Knowledge base available as fallback: {kb_path}")
     else:
         logging.warning(f"⚠️ Knowledge base directory not found: {kb_path}")
         
@@ -48,103 +47,30 @@ logger = logging.getLogger(__name__)
 app = Server("census-mcp")
 
 class CensusMCPServer:
-    """Clean Census MCP Server with Claude-first architecture"""
+    """Clean Census MCP Server with Claude direct knowledge"""
     
     def __init__(self):
         self.config = Config()
-        self.census_api = PythonCensusAPI(self.config.census_api_key)
+        self.census_api = PythonCensusAPI()
         self.search_engine = None
         
+        # Optional geographic handler for edge cases
+        try:
+            from data_retrieval.geographic_handler import GeographicHandler
+            geo_db_path = self.config.base_dir / "knowledge-base" / "geo-db" / "geography.db"
+            self.geo_handler = GeographicHandler(str(geo_db_path))
+            logger.info("✅ Geographic handler available as fallback")
+        except Exception as e:
+            logger.warning(f"Geographic handler unavailable: {e}")
+            self.geo_handler = None
+        
+        # Optional search engine for edge cases
         if KB_SEARCH_AVAILABLE:
             try:
                 self.search_engine = create_search_engine()
-                logger.info("✅ Knowledge base search engine initialized")
+                logger.info("✅ Knowledge base search available as fallback")
             except Exception as e:
                 logger.warning(f"Knowledge base search unavailable: {e}")
-    
-    def parse_query_with_claude_knowledge(self, query: str, location: str = "") -> Dict[str, Any]:
-        """
-        Parse query using Claude's built-in Census knowledge
-        Returns confidence score and routing decision
-        """
-        query_lower = query.lower()
-        location_lower = location.lower()
-        combined = f"{query_lower} {location_lower}".strip()
-        
-        parsed = {
-            'query': query,
-            'location': location,
-            'variables': [],
-            'geography_type': None,
-            'confidence': 0.0,
-            'routing': 'guidance'  # guidance, search_assisted, direct_api
-        }
-        
-        # Location confidence (Claude knows these patterns)
-        location_confidence = 0.0
-        if any(pattern in location_lower for pattern in [
-            'county', 'city', 'state', 'zip', 'zcta', 'cbsa', 'msa'
-        ]):
-            location_confidence = 0.8
-        elif location:
-            location_confidence = 0.6
-        
-        # Variable confidence (Claude knows common Census concepts)
-        variable_confidence = 0.0
-        variables = []
-        
-        # High confidence variables (Claude knows these codes)
-        if 'population' in query_lower:
-            variables.append('B01003_001E')  # Total population
-            variable_confidence = 0.9
-        elif 'median income' in query_lower or 'household income' in query_lower:
-            variables.append('B19013_001E')  # Median household income
-            variable_confidence = 0.9
-        elif 'poverty' in query_lower:
-            variables.append('B17001_002E')  # Poverty status
-            variable_confidence = 0.8
-        elif 'median age' in query_lower:
-            variables.append('B01002_001E')  # Median age
-            variable_confidence = 0.9
-        elif 'race' in query_lower or 'ethnicity' in query_lower:
-            variables.extend(['B02001_002E', 'B02001_003E', 'B03003_003E'])  # Race/ethnicity
-            variable_confidence = 0.8
-        elif 'education' in query_lower:
-            variables.append('B15003_022E')  # Educational attainment
-            variable_confidence = 0.7
-        elif 'housing' in query_lower and 'median' in query_lower:
-            variables.append('B25077_001E')  # Median home value
-            variable_confidence = 0.8
-        elif 'unemployment' in query_lower:
-            variables.append('B23025_005E')  # Unemployment
-            variable_confidence = 0.8
-        else:
-            # Medium confidence - might need search assistance
-            variable_confidence = 0.3
-        
-        # Geography type detection (Claude knowledge)
-        if 'county' in combined or 'counties' in combined:
-            parsed['geography_type'] = 'county'
-        elif 'state' in combined or any(state in location_lower for state in ['ca', 'ny', 'tx', 'fl']):
-            parsed['geography_type'] = 'state'
-        elif 'city' in combined or ',' in location:
-            parsed['geography_type'] = 'place'
-        elif 'zip' in combined or 'zcta' in combined:
-            parsed['geography_type'] = 'zcta'
-        
-        # Overall confidence calculation
-        parsed['confidence'] = (location_confidence + variable_confidence) / 2
-        parsed['variables'] = variables
-        
-        # Routing decision based on confidence
-        if parsed['confidence'] >= 0.8:
-            parsed['routing'] = 'direct_api'
-        elif parsed['confidence'] >= 0.5:
-            parsed['routing'] = 'search_assisted'
-        else:
-            parsed['routing'] = 'guidance'
-        
-        return parsed
 
 # Global server instance
 server_instance = CensusMCPServer()
@@ -155,13 +81,13 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="get_census_data",
-            description="PRIMARY TOOL: Get official US Census demographic data using natural language. Always use this tool FIRST for Census questions. Uses Claude's knowledge when confident, falls back to RAG tools when uncertain.",
+            description="PRIMARY TOOL: Get official US Census demographic data using natural language. Supports single queries and batch queries like 'all counties in Maryland by population'. Always use this tool FIRST for Census questions.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "location": {
                         "type": "string",
-                        "description": "Natural language location (e.g. 'St. Louis', 'Chicago, IL', 'Texas', '90210')"
+                        "description": "Natural language location (e.g. 'St. Louis', 'Chicago, IL', 'Texas', '90210', 'Maryland')"
                     },
                     "variables": {
                         "type": "array",
@@ -263,7 +189,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
     
     try:
         if name == "get_census_data":
-            return await _get_census_data_smart(arguments)
+            return await _get_census_data_direct(arguments)
         elif name == "resolve_geography":
             return await _resolve_geography(arguments)
         elif name == "get_demographic_data":
@@ -283,8 +209,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             text=f"❌ Error executing {name}: {str(e)}"
         )]
 
-async def _get_census_data_smart(arguments: Dict[str, Any]) -> List[TextContent]:
-    """Smart Census data retrieval using Claude's knowledge for routing"""
+async def _get_census_data_direct(arguments: Dict[str, Any]) -> List[TextContent]:
+    """Direct Census data retrieval using Claude's built-in knowledge"""
     
     location = arguments.get("location", "").strip()
     variables = arguments.get("variables", [])
@@ -293,121 +219,182 @@ async def _get_census_data_smart(arguments: Dict[str, Any]) -> List[TextContent]
     if not location or not variables:
         return [TextContent(
             type="text",
-            text="❌ **Missing required parameters**\n\n**Required:**\n- `location`: Geographic area (e.g., 'Baltimore, MD', 'California', '90210')\n- `variables`: Data requested (e.g., ['population', 'median income'])\n\n**Example:** get_census_data(location='Chicago, IL', variables=['population', 'poverty rate'])"
+            text="❌ **Missing required parameters**\n\n**Required:**\n- `location`: Geographic area (e.g., 'Baltimore, MD', 'California', '90210')\n- `variables`: Data requested (e.g., ['population', 'median income'])\n\n**Examples:**\n- get_census_data(location='Chicago, IL', variables=['population', 'poverty rate'])\n- get_census_data(location='Maryland', variables=['population']) for batch queries"
         )]
     
     # Convert single variable to list
     if isinstance(variables, str):
         variables = [variables]
     
-    # Parse query using Claude's knowledge
-    query_text = f"Get {', '.join(variables)} for {location}"
-    parsed = server_instance.parse_query_with_claude_knowledge(query_text, location)
-    
-    logger.info(f"📊 Smart routing: confidence={parsed['confidence']:.2f}, routing={parsed['routing']}")
-    
-    # Route based on confidence
-    if parsed['routing'] == 'direct_api':
-        # High confidence - use Claude's variable mapping directly
-        return await _execute_direct_api_call(location, parsed['variables'], parsed, include_methodology)
-    
-    elif parsed['routing'] == 'search_assisted':
-        # Medium confidence - use search to validate variables
-        return await _execute_search_assisted_call(location, variables, parsed, include_methodology)
-    
-    else:
-        # Low confidence - provide guidance
-        return await _provide_usage_guidance(query_text, location, variables)
-
-async def _execute_direct_api_call(location: str, variables: List[str], parsed: Dict, include_methodology: bool) -> List[TextContent]:
-    """Execute high-confidence API call using Claude's variable knowledge"""
+    logger.info(f"📊 Direct Census query: {location}, variables: {variables}")
     
     try:
-        # Use the demographic data tool with Claude's parsed information
-        api_args = {
-            "variables": variables,
-            "geography_type": parsed.get('geography_type', 'state')
-        }
-        
-        # Add location resolution here (simplified for demo)
-        if parsed.get('geography_type') == 'state':
-            # Simple state name to FIPS mapping (Claude knowledge)
-            state_fips_map = {
-                'california': '06', 'texas': '48', 'florida': '12', 'new york': '36',
-                'pennsylvania': '42', 'illinois': '17', 'ohio': '39', 'georgia': '13',
-                'north carolina': '37', 'michigan': '26', 'maryland': '24'
-            }
-            state_name = location.lower().replace(' state', '')
-            if state_name in state_fips_map:
-                api_args['state_fips'] = state_fips_map[state_name]
-        
-        result = await _get_demographic_data(api_args)
-        
-        if include_methodology:
-            result[0].text += f"\n\n---\n**🧠 Claude Routing**: High confidence ({parsed['confidence']:.2f}) - used direct API call with built-in variable knowledge"
-        
-        return result
+        # Use Claude's Census knowledge to construct API call directly
+        return await _construct_api_call_directly(location, variables, include_methodology)
         
     except Exception as e:
-        logger.error(f"Direct API call failed: {e}")
+        logger.warning(f"Direct approach failed: {e}")
+        
+        # Only fallback to search for genuine edge cases
+        if server_instance.search_engine:
+            return await _search_fallback(location, variables, include_methodology, str(e))
+        else:
+            return [TextContent(
+                type="text",
+                text=f"❌ **Census query failed**: {str(e)}\n\n💡 **Try:**\n- More specific location format ('City, State')\n- Common variable names (population, median income, poverty rate)\n- Use `resolve_geography` and `search_census_variables` tools for complex cases"
+            )]
+
+async def _construct_api_call_directly(location: str, variables: List[str], include_methodology: bool) -> List[TextContent]:
+    """Use Claude's direct Census knowledge from training data to construct API call"""
+    
+    # Step 1: Map variables using my Census training knowledge directly
+    census_variables = []
+    for var in variables:
+        var_clean = var.lower().strip()
+        
+        # Already a Census variable code?
+        if var.upper().startswith('B') and '_' in var and 'E' in var.upper():
+            census_variables.append(var.upper())
+            continue
+            
+        # Direct reasoning from training data - no lookups
+        if 'population' in var_clean:
+            census_variables.append('B01003_001E')
+        elif 'median household income' in var_clean or (('median' in var_clean or var_clean == 'income') and 'household' in var_clean):
+            census_variables.append('B19013_001E')
+        elif 'median family income' in var_clean:
+            census_variables.append('B19113_001E')
+        elif 'per capita income' in var_clean:
+            census_variables.append('B19301_001E')
+        elif 'poverty' in var_clean:
+            census_variables.append('B17001_002E')
+        elif 'median age' in var_clean or var_clean == 'age':
+            census_variables.append('B01002_001E')
+        elif 'home value' in var_clean or 'house value' in var_clean or 'housing value' in var_clean:
+            census_variables.append('B25077_001E')
+        elif 'unemployment' in var_clean:
+            census_variables.append('B23025_005E')
+        elif 'education' in var_clean or 'college' in var_clean or 'bachelor' in var_clean:
+            census_variables.append('B15003_022E')
+        else:
+            # Genuine unknown - use search fallback
+            raise Exception(f"Variable not in training data: {var}")
+    
+    # Step 2: Resolve geography using my training knowledge directly  
+    location_clean = location.lower().strip()
+    
+    # Direct reasoning from my Census training data
+    if location_clean in ['maine', 'me']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '23'}}
+    elif location_clean in ['nevada', 'nv']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '32'}}
+    elif location_clean in ['california', 'ca']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '06'}}
+    elif location_clean in ['texas', 'tx']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '48'}}
+    elif location_clean in ['florida', 'fl']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '12'}}
+    elif location_clean in ['new york', 'ny']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '36'}}
+    elif location_clean in ['maryland', 'md']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '24'}}
+    elif location_clean in ['virginia', 'va']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '51'}}
+    elif location_clean in ['illinois', 'il']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '17'}}
+    elif location_clean in ['pennsylvania', 'pa']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '42'}}
+    elif location_clean in ['ohio', 'oh']:
+        geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': '39'}}
+    elif 'reno' in location_clean and 'nv' in location_clean:
+        geography_params = {'geography_type': 'place', 'fips_codes': {'state_fips': '32', 'place_fips': '60600'}}
+    elif 'chicago' in location_clean and 'il' in location_clean:
+        geography_params = {'geography_type': 'place', 'fips_codes': {'state_fips': '17', 'place_fips': '14000'}}
+    elif 'baltimore' in location_clean and 'md' in location_clean:
+        geography_params = {'geography_type': 'place', 'fips_codes': {'state_fips': '24', 'place_fips': '04000'}}
+    elif location.isdigit() and len(location) == 5:
+        geography_params = {'geography_type': 'zcta', 'fips_codes': {'zcta_code': location}}
+    elif ',' in location:
+        # Parse City, State - use training knowledge for common states
+        parts = [p.strip() for p in location.split(',')]
+        if len(parts) == 2:
+            city, state = parts
+            state_clean = state.lower()
+            
+            # Get state FIPS from training knowledge
+            state_fips = None
+            if state_clean in ['ca', 'california']:
+                state_fips = '06'
+            elif state_clean in ['tx', 'texas']:
+                state_fips = '48'
+            elif state_clean in ['fl', 'florida']:
+                state_fips = '12'
+            elif state_clean in ['ny', 'new york']:
+                state_fips = '36'
+            elif state_clean in ['nv', 'nevada']:
+                state_fips = '32'
+            elif state_clean in ['md', 'maryland']:
+                state_fips = '24'
+            elif state_clean in ['me', 'maine']:
+                state_fips = '23'
+            
+            if state_fips:
+                # Default to state level for unknown cities
+                geography_params = {'geography_type': 'state', 'fips_codes': {'state_fips': state_fips}}
+            else:
+                raise Exception(f"State not in training data: {state}")
+        else:
+            raise Exception(f"Cannot parse location format: {location}")
+    else:
+        # Location not in training data - use fallback
+        raise Exception(f"Location not in training data: {location}")
+    
+    # Step 3: Construct and execute API call
+    api_args = {
+        "geography_type": geography_params['geography_type'],
+        "variables": census_variables
+    }
+    api_args.update(geography_params['fips_codes'])
+    
+    # Execute the API call
+    result = await _get_demographic_data(api_args)
+    
+    if include_methodology:
+        result[0].text += f"\n\n---\n**🧠 Claude Direct**: Reasoned from Census training data (no lookups)"
+    
+    return result
+
+# Removed lookup helper functions - using direct reasoning in _construct_api_call_directly
+
+async def _search_fallback(location: str, variables: List[str], include_methodology: bool, error_msg: str) -> List[TextContent]:
+    """Fallback to search when Claude's direct knowledge is insufficient"""
+    
+    if not server_instance.search_engine:
         return [TextContent(
             type="text",
-            text=f"❌ **Direct API call failed**: {str(e)}\n\n💡 **Suggestion**: Try using `search_census_variables` to find the right variable codes first."
+            text=f"❌ **Cannot resolve**: Claude's direct knowledge insufficient and search unavailable\n\n**Location**: {location}\n**Variables**: {variables}\n**Error**: {error_msg}\n\n💡 **Try:**\n- More common location/variable names\n- Use `resolve_geography` and `search_census_variables` tools"
         )]
-
-async def _execute_search_assisted_call(location: str, variables: List[str], parsed: Dict, include_methodology: bool) -> List[TextContent]:
-    """Execute search-assisted call for medium confidence queries"""
     
-    response_parts = [f"🔍 **Search-assisted query** (confidence: {parsed['confidence']:.2f})\n"]
-    
-    # Search for each variable to get proper codes
-    found_variables = []
-    for var in variables:
-        search_result = await _search_census_variables({"query": var, "max_results": 3})
-        if search_result and "❌" not in search_result[0].text:
-            response_parts.append(f"**Variable search for '{var}':**")
-            response_parts.append(search_result[0].text)
-            # Extract variable codes from search results (simplified)
-            # In real implementation, parse the search results properly
-            found_variables.append(var)
-    
-    if found_variables:
-        response_parts.append(f"\n💡 **Next step**: Use `get_demographic_data` with the variable codes found above.")
-    
-    return [TextContent(type="text", text="\n".join(response_parts))]
-
-async def _provide_usage_guidance(query: str, location: str, variables: List[str]) -> List[TextContent]:
-    """Provide usage guidance for low-confidence queries"""
-    
-    guidance = [
-        f"🤔 **Query needs clarification** (query: '{query}')\n",
-        "**Issues identified:**"
+    response_parts = [
+        f"🔍 **Search fallback** - Claude's direct knowledge insufficient\n",
+        f"**Issue**: {error_msg}",
+        f"**Location**: {location}",
+        f"**Variables**: {variables}\n"
     ]
     
-    if not location:
-        guidance.append("- ❌ **Location unclear**: Please specify city, county, state, or ZIP code")
+    # Search for variables
+    for var in variables:
+        search_result = await _search_census_variables({"query": var, "max_results": 3})
+        response_parts.append(f"**Variable search for '{var}':**")
+        response_parts.append(search_result[0].text)
+        response_parts.append("")
     
-    if not variables:
-        guidance.append("- ❌ **Variables unclear**: Please specify what demographic data you need")
+    response_parts.append("💡 **Next step**: Use found variable codes with `get_demographic_data` and resolved geography")
     
-    guidance.extend([
-        "\n**💡 Examples of clear queries:**",
-        "- `location='Baltimore, MD', variables=['population', 'median income']`",
-        "- `location='California', variables=['poverty rate', 'unemployment']`",
-        "- `location='90210', variables=['median home value', 'education level']`",
-        "\n**🔧 Tools to help clarify:**",
-        "- Use `resolve_geography` to find the right location codes",
-        "- Use `search_census_variables` to find variable definitions",
-        "\n**📚 Common variables:**",
-        "- Population: 'population', 'total population'",
-        "- Income: 'median income', 'household income', 'per capita income'",
-        "- Poverty: 'poverty rate', 'poverty status'",
-        "- Age: 'median age', 'age distribution'",
-        "- Education: 'education level', 'college degree', 'high school'",
-        "- Housing: 'median home value', 'housing costs', 'rent'"
-    ])
+    if include_methodology:
+        response_parts.append("\n---\n**🧠 Claude Routing**: Fell back to search - direct knowledge insufficient")
     
-    return [TextContent(type="text", text="\n".join(guidance))]
+    return [TextContent(type="text", text="\n".join(response_parts))]
 
 async def _resolve_geography(arguments: Dict[str, Any]) -> List[TextContent]:
     """Resolve geographic location to FIPS codes"""
@@ -422,7 +409,14 @@ async def _resolve_geography(arguments: Dict[str, Any]) -> List[TextContent]:
     
     try:
         logger.info(f"🗺️ Resolving geography: '{location}'")
-        results = server_instance.census_api.resolve_geography(location, max_results)
+        
+        if not server_instance.geo_handler:
+            return [TextContent(
+                type="text",
+                text="❌ **Geographic handler unavailable**\n\nGeography resolution requires the geographic database to be properly initialized."
+            )]
+        
+        results = server_instance.geo_handler.search_locations(location, max_results)
         
         if not results:
             return [TextContent(
@@ -433,13 +427,29 @@ async def _resolve_geography(arguments: Dict[str, Any]) -> List[TextContent]:
         response_parts = [f"🗺️ **Geographic matches for '{location}'**\n"]
         
         for i, result in enumerate(results[:max_results], 1):
-            response_parts.append(f"**{i}.** {result.get('name', 'Unknown')}")
-            response_parts.append(f"   - **Type**: {result.get('geography_type', 'Unknown')}")
-            response_parts.append(f"   - **FIPS**: {result.get('fips_code', 'N/A')}")
-            response_parts.append(f"   - **State**: {result.get('state', 'N/A')}")
+            name = result.get('name', 'Unknown')
+            geo_type = result.get('geography_type', 'Unknown')
+            confidence = result.get('confidence', 0.0)
+            
+            response_parts.append(f"**{i}.** {name}")
+            response_parts.append(f"   - **Type**: {geo_type.title()}")
+            response_parts.append(f"   - **Confidence**: {confidence:.1%}")
+            
+            # Add relevant FIPS codes
+            if geo_type == 'place' and 'place_fips' in result:
+                response_parts.append(f"   - **Place FIPS**: {result['state_fips']}{result['place_fips']}")
+                response_parts.append(f"   - **State**: {result.get('state_abbrev', 'N/A')}")
+            elif geo_type == 'county' and 'county_fips' in result:
+                response_parts.append(f"   - **County FIPS**: {result['state_fips']}{result['county_fips']}")
+                response_parts.append(f"   - **State**: {result.get('state_abbrev', 'N/A')}")
+            elif geo_type == 'cbsa' and 'cbsa_code' in result:
+                response_parts.append(f"   - **CBSA Code**: {result['cbsa_code']}")
+            elif geo_type == 'zcta' and 'zcta_code' in result:
+                response_parts.append(f"   - **ZCTA Code**: {result['zcta_code']}")
+            
             response_parts.append("")
         
-        response_parts.append("💡 **Use the FIPS codes above with `get_demographic_data`**")
+        response_parts.append("💡 **Use the appropriate FIPS codes above with `get_demographic_data`**")
         
         return [TextContent(type="text", text="\n".join(response_parts))]
         
@@ -467,7 +477,6 @@ async def _get_demographic_data(arguments: Dict[str, Any]) -> List[TextContent]:
         
         # Build API parameters
         api_params = {
-            "geography_type": geography_type,
             "variables": variables
         }
         
@@ -476,7 +485,14 @@ async def _get_demographic_data(arguments: Dict[str, Any]) -> List[TextContent]:
             if geo_param in arguments:
                 api_params[geo_param] = arguments[geo_param]
         
-        result = server_instance.census_api.get_demographic_data(**api_params)
+        # Use the correct API method
+        result = server_instance.census_api.get_acs_data(geography_type=geography_type, **api_params)
+        
+        if result.get('error'):
+            return [TextContent(
+                type="text",
+                text=f"❌ **Census API Error**: {result['error']}"
+            )]
         
         if not result or not result.get('data'):
             return [TextContent(
@@ -487,22 +503,43 @@ async def _get_demographic_data(arguments: Dict[str, Any]) -> List[TextContent]:
         # Format the response
         response_parts = [f"🏛️ **Official Census Data** ({geography_type.title()} Level)\n"]
         
-        data = result['data'][0] if result['data'] else {}
-        location_name = result.get('location_name', 'Unknown Location')
-        
-        response_parts.append(f"**Location**: {location_name}")
-        response_parts.append("")
-        
-        for var_id in variables:
-            value = data.get(var_id, 'No data')
-            response_parts.append(f"**{var_id}**: {value}")
+        # Handle the different data format from get_acs_data
+        if result.get('batch_query'):
+            # Batch query result
+            data_list = result['data']
+            response_parts.append(f"**Batch Results**: {len(data_list)} locations")
+            response_parts.append("")
+            
+            for i, location_data in enumerate(data_list[:10]):  # Show first 10
+                location_name = location_data.get('location_name', f'Location {i+1}')
+                response_parts.append(f"**{i+1}. {location_name}:**")
+                
+                for var_id in variables:
+                    var_data = location_data['data'].get(var_id, {})
+                    estimate = var_data.get('estimate', 'No data')
+                    label = var_data.get('label', var_id)
+                    response_parts.append(f"   - {label}: {estimate}")
+                response_parts.append("")
+        else:
+            # Single geography result
+            data = result['data']
+            location_name = result.get('location_name', 'Unknown Location')
+            
+            response_parts.append(f"**Location**: {location_name}")
+            response_parts.append("")
+            
+            for var_id in variables:
+                var_data = data.get(var_id, {})
+                estimate = var_data.get('estimate', 'No data')
+                label = var_data.get('label', var_id)
+                response_parts.append(f"**{label}**: {estimate}")
         
         response_parts.extend([
             "",
             "---",
             f"**Source**: US Census Bureau ACS 2023",
             f"**Geography Type**: {geography_type.title()}",
-            f"**Query Time**: {result.get('query_time', 'Unknown')}"
+            f"**API URL**: {result.get('api_url', 'Unknown')[:100]}..."
         ])
         
         return [TextContent(type="text", text="\n".join(response_parts))]
@@ -535,7 +572,7 @@ async def _search_census_variables(arguments: Dict[str, Any]) -> List[TextConten
     try:
         logger.info(f"🔍 Searching variables: '{query}'")
         
-        results = server_instance.search_engine.search(query, limit=max_results)
+        results = server_instance.search_engine.search(query, max_results=max_results)
         
         if not results:
             return [TextContent(

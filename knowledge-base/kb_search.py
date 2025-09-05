@@ -121,9 +121,9 @@ class VariablesSearch:
             
             results = []
             for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.variable_ids):
-                    variable_id = self.variable_ids[idx]
-                    metadata = self.metadata.get(variable_id, {})
+                if idx < len(self.metadata):
+                    metadata = self.metadata[idx]  # Access by index, not by variable_id
+                    variable_id = metadata.get('variable_id', f'INDEX_{idx}')
                     
                     result = VariableResult(
                         variable_id=variable_id,
@@ -318,12 +318,8 @@ class ConceptBasedCensusSearchEngine:
         # Search variables using FAISS
         results = self.variables_search.search(synonymized_query, max_results)
         
-        # Add methodology context to top results
-        if results and self.methodology_search.collection:
-            methodology_context = self.methodology_search.search(query)
-            if methodology_context:
-                # Add to top result
-                results[0].methodology_notes = methodology_context[:200]
+        # Skip methodology context due to embedding dimension mismatch
+        # TODO: Fix methodology search embedding compatibility
         
         return results
     
