@@ -30,3 +30,5 @@ requests>=2.28.0
 
 # Data handling
 dataclasses  # Built-in for Python 3.7+
+
+mcp-proxy>=0.8.2

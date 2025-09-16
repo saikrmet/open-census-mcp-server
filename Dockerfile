@@ -11,8 +11,6 @@
 #   docker build -t ghcr.io/brockwebb/open-census-mcp:2.0 .
 # ---------------------------------------------
 FROM python:3.11-slim AS base
-LABEL maintainer="brockwebb" \
-      org.opencontainers.image.source="https://github.com/brockwebb/open-census-mcp-server"
 
 # --------------------------------------------------
 # 1️⃣  System‑level dependencies (R + dev headers)
@@ -115,4 +113,4 @@ USER census
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import sys; sys.path.append('/app/src'); from census_mcp_server import health_check; exit(0 if health_check() else 1)"
 
-CMD ["python", "src/census_mcp_server.py"]
+CMD ["mcp-proxy", "--host", "0.0.0.0", "--port", "8000", "--", "python", "src/census_mcp_server.py"]
